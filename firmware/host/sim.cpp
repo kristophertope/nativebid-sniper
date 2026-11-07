@@ -65,6 +65,7 @@ struct FakeNB : NativeBid {
   FakeLot* by_ref(const std::string& ref) {
     for (auto& kv : lots) {
       if (ref == kv.first || ref == kv.second.id || ref == url(kv.first)) return &kv.second;
+      if (ref.size() >= 5 && url(kv.first).find("/" + ref + "/") != std::string::npos) return &kv.second;
     }
     return nullptr;
   }
@@ -359,7 +360,10 @@ static void buttons_and_html() {
   expect(contains(plain(tg.sent.back().second), "Your snipes"), "a command sent as a reply still runs as a command");
   reply(prompt, "10");
   msg("/info X");
-  expect(contains(tg.messages[tg.next_id - 1].first, "Snipe #1 is set at <b>$10.00</b>"), "/info shows the snipe");
+  long long info = tg.next_id - 1;
+  expect(contains(tg.messages[info].first, "Snipe #1 is set at <b>$10.00</b>"), "/info shows the snipe");
+  press(info, "✏️ Change max");
+  expect(contains(tg.messages[tg.next_id - 1].first, "New max for snipe #1?"), "/info ✏️ on a sniped lot asks for its new max");
   msg("/list");
   long long list = tg.next_id - 1;
   press(list, "⚙️ Edit #1");
@@ -370,6 +374,27 @@ static void buttons_and_html() {
   expect(contains(tg.answers.back(), "no snipe matching 1"), "stale card button explains the snipe is gone");
   reply(prompt, "20");
   expect(contains(plain(tg.sent.back().second), "no snipe matching 1"), "reply to a stale prompt explains the snipe is gone");
+  msg("/i X");
+  long long fresh = tg.next_id - 1;
+  press(fresh, "✏️ Set max");
+  long long ask = tg.next_id - 1;
+  expect(tg.messages[ask].second.force_reply && contains(tg.messages[ask].first, "Max for lot 266333831?"),
+         "/info ✏️ on an unsniped lot asks for a max");
+  reply(ask, "12");
+  expect(contains(tg.messages[tg.next_id - 1].first, "scheduled</b>") &&
+             contains(tg.messages[tg.next_id - 1].first, "<b>$12.00</b>"),
+         "replying schedules a new snipe at that max");
+  reply(ask, "13");
+  expect(contains(tg.messages[tg.next_id - 1].first, "<s>$12.00</s> → <b>$13.00</b>"),
+         "replying again to the same prompt updates that snipe");
+  msg("/c 266333831");
+  nb.lots["Z"] = {"999", c.t - 10, 1.0, nullptr};
+  msg("/i Z");
+  bool pencil = false;
+  for (const auto& row : tg.messages[tg.next_id - 1].second.rows) {
+    for (const auto& b : row) pencil = pencil || contains(b.first, "✏️");
+  }
+  expect(contains(tg.messages[tg.next_id - 1].first, "<b>Ended</b>") && !pencil, "/info on an ended lot has no ✏️");
   msg("/snipe X 10");
   msg("/cancel https://www.nativebid.com/Event/LotDetails/266333831/x");
   expect(contains(tg.sent.back().second, "cancelled"), "/cancel by URL");

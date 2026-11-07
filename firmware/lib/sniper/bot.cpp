@@ -30,6 +30,13 @@ static const std::map<std::string, std::string> ALIASES = {
     {"/s", "/snipe"}, {"/l", "/list"}, {"/c", "/cancel"}, {"/i", "/info"}};
 
 static const std::string ASK = "New max for snipe #";
+static const std::string ASK_LOT = "Max for lot ";
+
+static std::string digits_after(const std::string& s, size_t start) {
+  size_t end = start;
+  while (end < s.size() && std::isdigit((unsigned char)s[end])) end++;
+  return s.substr(start, end - start);
+}
 
 static std::string esc(const std::string& s) { return html_escape(s); }
 
@@ -378,18 +385,19 @@ void Bot::report(const Result& r) {
 }
 
 bool Bot::answer_prompt(const std::string& text, const std::string& reply_to) {
-  size_t at = reply_to.find(ASK);
-  if (at == std::string::npos || starts_with(trim(text), "/")) return false;
-  size_t start = at + ASK.size(), end = start;
-  while (end < reply_to.size() && std::isdigit((unsigned char)reply_to[end])) end++;
-  std::string sid = reply_to.substr(start, end - start);
+  size_t snipe_at = reply_to.find(ASK), lot_at = reply_to.find(ASK_LOT);
+  if ((snipe_at == std::string::npos && lot_at == std::string::npos) || starts_with(trim(text), "/")) return false;
   double amount = money(text);
   if (std::isnan(amount) || amount <= 0) {
     report(Result::site("\"" + trim(text) + "\" isn’t a dollar amount. Reply with just the number, like 15."));
     return true;
   }
+  if (snipe_at == std::string::npos) {
+    report(add(digits_after(reply_to, lot_at + ASK_LOT.size()), amount));
+    return true;
+  }
   long id = 0;
-  Result r = find(sid, id);
+  Result r = find(digits_after(reply_to, snipe_at + ASK.size()), id);
   if (r.ok()) r = add(get(id)->url, amount);
   report(r);
   return true;
@@ -453,6 +461,14 @@ void Bot::press(const std::string& query_id, const std::string& data, long long 
       say("✏️ <b>" + ASK + std::to_string(id) + "?</b>\n" + link(s.url, s.title) + "\n\nIt’s " + fmt(s.max) +
               " now. Reply with the new amount, like <code>15</code>.",
           Keyboard::reply("New max, e.g. 15"));
+    }
+  } else if (kind == "new") {
+    Lot lot;
+    r = nb_.lot(rest, lot);
+    if (r.ok()) {
+      say("✏️ <b>" + ASK_LOT + rest + "?</b>\n" + link(lot.url, lot.title) + "\n\nNext bid is " + fmt(lot.minimum) +
+              ". Reply with your max, like <code>15</code>.",
+          Keyboard::reply("Your max, e.g. 15"));
     }
   } else if (kind == "card" || kind == "open") {
     long id = 0;
@@ -672,13 +688,20 @@ Result Bot::info(const std::string& ref, long long edit) {
   std::string text = "ℹ️ " + link(lot.url, lot.title) + "\n\nStatus: <b>" +
                      esc(lot.status.empty() ? "unknown" : lot.status) + "</b>\n" + prices(lot) + "\n" + ends;
   if (!std::isnan(lot.my_max)) text += "\n\nYour max on the site: <b>" + fmt(lot.my_max) + "</b>";
+  const Snipe* mine = nullptr;
   for (const auto& s : snipes) {
-    if (s.listing_id == lot.listing_id) {
-      text += "\n\n🎯 Snipe #" + std::to_string(s.id) + " is set at <b>" + fmt(s.max) + "</b>";
-      break;
-    }
+    if (s.listing_id == lot.listing_id) mine = &s;
   }
-  say(text, Keyboard::of({{button("🔄 Refresh", "info:" + lot.listing_id)}}), edit);
+  if (mine) text += "\n\n🎯 Snipe #" + std::to_string(mine->id) + " is set at <b>" + fmt(mine->max) + "</b>";
+  std::vector<std::pair<std::string, std::string>> row;
+  if (mine && mine->state == "pending") {
+    row.push_back(button("✏️ Change max", "edit:" + std::to_string(mine->id)));
+  } else if (!mine && left > 0) {
+    std::vector<std::string> lot_numbers = numbers(lot.url);
+    row.push_back(button("✏️ Set max", "new:" + (lot_numbers.empty() ? lot.listing_id : lot_numbers[0])));
+  }
+  row.push_back(button("🔄 Refresh", "info:" + lot.listing_id));
+  say(text, Keyboard::of({row}), edit);
   return {};
 }
 
