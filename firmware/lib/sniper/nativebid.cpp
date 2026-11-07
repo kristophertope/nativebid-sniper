@@ -47,7 +47,9 @@ Result NativeBid::time_remaining(const std::string& listing_id, double& left) {
   if (deserializeJson(doc, body)) return Result::site("GetTimeRemaining sent something unexpected");
   std::string error = doc["error"] | "";
   if (!error.empty()) return Result::site("GetTimeRemaining error: " + error);
-  left = doc["secondsRemaining"] | 0.0;
+  JsonVariant seconds = doc["secondsRemaining"];
+  if (!seconds.is<double>()) return Result::site("GetTimeRemaining didn\xE2\x80\x99t include the time left");
+  left = seconds.as<double>();
   return {};
 }
 

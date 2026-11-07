@@ -447,7 +447,39 @@ static void command_burst() {
          "bid still lands 60s before the end despite 8s-per-request commands");
 }
 
+struct Canned : Clock {
+  std::string body;
+  bool http(const HttpRequest&, const HeadFn& head, const DataFn& data, std::string&) override {
+    HttpHead h;
+    h.status = 200;
+    if (head && !head(h)) return true;
+    if (data) data(body.data(), body.size());
+    return true;
+  }
+};
+
+static void time_replies() {
+  std::printf("\nscenario: odd GetTimeRemaining replies\n");
+  Canned c;
+  NativeBid nb(c, "u", "p");
+  auto check = [&](const std::string& body, bool ok, double want) {
+    c.body = body;
+    double left = -1;
+    Result r = nb.time_remaining("1", left);
+    expect(r.ok() == ok && (!ok || std::fabs(left - want) < 1e-3),
+           body + " -> " + (r.ok() ? "left " + std::to_string(left) : "error: " + r.msg));
+  };
+  check("{\"secondsRemaining\": 706.7, \"error\": \"\"}", true, 706.7);
+  check("{\"secondsRemaining\": 5, \"error\": \"\"}", true, 5);
+  check("{\"secondsRemaining\": 0, \"error\": \"\"}", true, 0);
+  check("{\"error\": \"\"}", false, 0);
+  check("{\"secondsRemaining\": null, \"error\": \"\"}", false, 0);
+  check("{\"secondsRemaining\": \"70\", \"error\": \"\"}", false, 0);
+  check("{\"secondsRemaining\": 0, \"error\": \"ERROR_NOT_FOUND\"}", false, 0);
+}
+
 int main() {
+  time_replies();
   command_burst();
   failing_bid();
   broken_snipe();
