@@ -23,7 +23,10 @@ Result Telegram::send(const std::string& text, const Keyboard& kb, long long edi
   params["text"] = prefix(text, 4000);
   params["parse_mode"] = "HTML";
   params["link_preview_options"]["is_disabled"] = true;
-  if (kb.set) {
+  if (kb.force_reply) {
+    params["reply_markup"]["force_reply"] = true;
+    params["reply_markup"]["input_field_placeholder"] = kb.placeholder;
+  } else if (kb.set) {
     JsonArray rows = params["reply_markup"]["inline_keyboard"].to<JsonArray>();
     for (const auto& row : kb.rows) {
       JsonArray r = rows.add<JsonArray>();

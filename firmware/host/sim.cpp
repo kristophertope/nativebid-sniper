@@ -318,15 +318,26 @@ static void buttons_and_html() {
     }
     expect(false, "button " + label + " exists on message " + std::to_string(id));
   };
+  auto reply = [&](long long prompt, const std::string& t) {
+    bot.handle(t, plain(tg.messages[prompt].first));
+    bot.flush();
+  };
   msg("/help");
   msg("/snipe X 10");
   long long card = tg.next_id - 1;
-  press(card, "+$5");
-  expect(contains(tg.messages[card].first, "<s>$10.00</s> → <b>$15.00</b>"), "+$5 edits the card in place");
-  expect(tg.answers.back() == "Max is now $15.00", "+$5 pops up the new max");
-  press(card, "−$5");
-  press(card, "−$5");
-  expect(tg.answers.back() == "Your max $5.00 is below the next bid $8.00. (alert)", "going below the next bid alerts");
+  press(card, "✏️ Change max");
+  long long prompt = tg.next_id - 1;
+  expect(tg.messages[prompt].second.force_reply && contains(tg.messages[prompt].first, "New max for snipe #1?"),
+         "✏️ asks for the new max with the reply keyboard open");
+  reply(prompt, "15");
+  expect(contains(tg.messages[tg.next_id - 1].first, "<s>$10.00</s> → <b>$15.00</b>"), "replying 15 updates the max");
+  reply(prompt, "$4");
+  expect(contains(plain(tg.sent.back().second), "Your max $4.00 is below the next bid $8.00."), "too-low reply explained");
+  reply(prompt, "lots");
+  expect(contains(plain(tg.sent.back().second), "\"lots\" isn’t a dollar amount"), "non-number reply explained");
+  reply(prompt, "/l");
+  expect(contains(plain(tg.sent.back().second), "Your snipes"), "a command sent as a reply still runs as a command");
+  reply(prompt, "10");
   msg("/info X");
   expect(contains(tg.messages[tg.next_id - 1].first, "Snipe #1 is set at <b>$10.00</b>"), "/info shows the snipe");
   msg("/list");
@@ -335,8 +346,10 @@ static void buttons_and_html() {
   expect(tg.next_id - 1 == list + 1, "Edit opens a new card");
   press(list, "✕ Cancel #1");
   expect(contains(tg.messages[list].first, "No snipes"), "Cancel from the list re-renders it");
-  press(card, "+$1");
+  press(card, "✏️ Change max");
   expect(contains(tg.answers.back(), "no snipe matching 1"), "stale card button explains the snipe is gone");
+  reply(prompt, "20");
+  expect(contains(plain(tg.sent.back().second), "no snipe matching 1"), "reply to a stale prompt explains the snipe is gone");
   msg("/snipe X 10");
   msg("/cancel https://www.nativebid.com/Event/LotDetails/266333831/x");
   expect(contains(tg.sent.back().second, "cancelled"), "/cancel by URL");

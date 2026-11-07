@@ -13,8 +13,23 @@ namespace sniper {
 struct Keyboard {
   bool set = false;
   std::vector<std::vector<std::pair<std::string, std::string>>> rows;
-  static Keyboard none() { return {}; }
-  static Keyboard empty() { return {true, {}}; }
+  bool force_reply = false;
+  std::string placeholder;
+  using Rows = std::vector<std::vector<std::pair<std::string, std::string>>>;
+  static Keyboard none() { return Keyboard(); }
+  static Keyboard of(Rows rows) {
+    Keyboard k;
+    k.set = true;
+    k.rows = std::move(rows);
+    return k;
+  }
+  static Keyboard empty() { return of({}); }
+  static Keyboard reply(const std::string& text) {
+    Keyboard k;
+    k.force_reply = true;
+    k.placeholder = text;
+    return k;
+  }
 };
 
 class Telegram {

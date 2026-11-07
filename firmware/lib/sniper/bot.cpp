@@ -1,6 +1,7 @@
 #include "bot.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <map>
 
@@ -27,6 +28,8 @@ static const std::map<std::string, std::pair<size_t, std::string>> USAGE = {
 
 static const std::map<std::string, std::string> ALIASES = {
     {"/s", "/snipe"}, {"/l", "/list"}, {"/c", "/cancel"}, {"/i", "/info"}};
+
+static const std::string ASK = "New max for snipe #";
 
 static std::string esc(const std::string& s) { return html_escape(s); }
 
@@ -330,7 +333,7 @@ Result Bot::poll(int wait) {
       }
       std::string text = m["text"] | "";
       p_.log("\xE2\x86\x90 " + text);
-      handle(text);
+      handle(text, m["reply_to_message"]["text"] | "");
     }
     r = flush();
     if (!r.ok()) return r;
@@ -347,7 +350,26 @@ void Bot::report(const Result& r) {
   }
 }
 
-void Bot::handle(const std::string& text) {
+bool Bot::answer_prompt(const std::string& text, const std::string& reply_to) {
+  size_t at = reply_to.find(ASK);
+  if (at == std::string::npos || starts_with(trim(text), "/")) return false;
+  size_t start = at + ASK.size(), end = start;
+  while (end < reply_to.size() && std::isdigit((unsigned char)reply_to[end])) end++;
+  std::string sid = reply_to.substr(start, end - start);
+  double amount = money(text);
+  if (std::isnan(amount) || amount <= 0) {
+    report(Result::site("\"" + trim(text) + "\" isn’t a dollar amount. Reply with just the number, like 15."));
+    return true;
+  }
+  long id = 0;
+  Result r = find(sid, id);
+  if (r.ok()) r = add(get(id)->url, amount);
+  report(r);
+  return true;
+}
+
+void Bot::handle(const std::string& text, const std::string& reply_to) {
+  if (answer_prompt(text, reply_to)) return;
   std::vector<std::string> parts = split_ws(text);
   std::string cmd = parts.empty() ? "" : lower(parts[0].substr(0, parts[0].find('@')));
   auto alias = ALIASES.find(cmd);
@@ -396,14 +418,14 @@ void Bot::press(const std::string& query_id, const std::string& data, long long 
   std::string rest = colon == std::string::npos ? "" : data.substr(colon + 1);
   std::string note;
   Result r;
-  if (kind == "bump") {
-    size_t c = rest.find(':');
+  if (kind == "edit") {
     long id = 0;
-    r = find(rest.substr(0, c), id);
+    r = find(rest, id);
     if (r.ok()) {
-      double target = cents(get(id)->max + std::atof(rest.substr(c + 1).c_str()));
-      r = add(get(id)->url, target, msg);
-      if (r.ok() && get(id)) note = "Max is now " + fmt(get(id)->max);
+      const Snipe& s = *get(id);
+      say("✏️ <b>" + ASK + std::to_string(id) + "?</b>\n" + link(s.url, s.title) + "\n\nIt’s " + fmt(s.max) +
+              " now. Reply with the new amount, like <code>15</code>.",
+          Keyboard::reply("New max, e.g. 15"));
     }
   } else if (kind == "card" || kind == "open") {
     long id = 0;
@@ -565,13 +587,8 @@ Result Bot::card(long id, const Lot* lot, double left, const std::string& headin
                      "\n\nYour max: " + mx + "\n<i>Up to " + esc(s.total.empty() ? "?" : s.total) +
                      " with fees</i>\n\n" + prices(*lot) + "\nEnds <b>" + when(s.ends) + "</b>\nIn " + duration(left) +
                      " · bidding " + num(LEAD) + "s before the end";
-  Keyboard kb{true, {}};
-  std::vector<std::pair<std::string, std::string>> bumps;
-  for (int d : {-5, -1, 1, 5}) {
-    bumps.push_back(button(std::string(d < 0 ? "−" : "+") + "$" + std::to_string(std::abs(d)),
-                           "bump:" + sid + ":" + std::to_string(d)));
-  }
-  kb.rows.push_back(bumps);
+  Keyboard kb = Keyboard::empty();
+  kb.rows.push_back({button("✏️ Change max", "edit:" + sid)});
   kb.rows.push_back({button("🔄 Refresh", "card:" + sid), button("✕ Cancel", "cancel:" + sid)});
   say(text, kb, edit);
   return {};
@@ -580,7 +597,7 @@ Result Bot::card(long id, const Lot* lot, double left, const std::string& headin
 Result Bot::show(long long edit) {
   auto refresh = std::vector<std::pair<std::string, std::string>>{button("🔄 Refresh", "list")};
   if (snipes.empty()) {
-    say("📋 <b>No snipes</b>\n\nSet one with <code>/snipe lot max</code>.", Keyboard{true, {refresh}}, edit);
+    say("📋 <b>No snipes</b>\n\nSet one with <code>/snipe lot max</code>.", Keyboard::of({refresh}), edit);
     return {};
   }
   double now = p_.now();
@@ -588,7 +605,7 @@ Result Bot::show(long long edit) {
   for (const auto& s : snipes) sorted.push_back(&s);
   std::stable_sort(sorted.begin(), sorted.end(), [](const Snipe* a, const Snipe* b) { return a->ends < b->ends; });
   std::string text = "📋 <b>Your snipes</b>";
-  Keyboard kb{true, {}};
+  Keyboard kb = Keyboard::empty();
   for (const Snipe* s : sorted) {
     std::string sid = std::to_string(s->id);
     text += "\n\n<b>#" + sid + "</b> · " + link(s->url, prefix(s->title, 60));
@@ -635,7 +652,7 @@ Result Bot::info(const std::string& ref, long long edit) {
       break;
     }
   }
-  say(text, Keyboard{true, {{button("🔄 Refresh", "info:" + lot.listing_id)}}}, edit);
+  say(text, Keyboard::of({{button("🔄 Refresh", "info:" + lot.listing_id)}}), edit);
   return {};
 }
 

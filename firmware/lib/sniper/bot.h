@@ -31,7 +31,7 @@ class Bot {
   bool start();
   void run();
   Result tick();
-  void handle(const std::string& text);
+  void handle(const std::string& text, const std::string& reply_to = "");
   void press(const std::string& query_id, const std::string& data, long long message_id);
   Result flush();
   void say(const std::string& text, const Keyboard& kb = Keyboard::none(), long long edit = 0);
@@ -54,6 +54,7 @@ class Bot {
   void missed(long id);
   Result poll(int wait);
   void report(const Result& r);
+  bool answer_prompt(const std::string& text, const std::string& reply_to);
   Result find(const std::string& ref, long& id);
   Result by_lot(const std::string& ref, long& id);
   Result confirm(const Lot& lot, double amount, std::string& total);
