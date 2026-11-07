@@ -54,6 +54,7 @@ class Scanner {
     std::vector<Pattern> alts;
     bool many;
     size_t pos;
+    size_t anchor;
   };
   std::vector<Rule> rules_;
   std::string buf_;

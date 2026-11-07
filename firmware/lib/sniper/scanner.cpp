@@ -1,5 +1,6 @@
 #include "scanner.h"
 
+#include <algorithm>
 #include <cctype>
 
 #include "text.h"
@@ -157,8 +158,11 @@ static Outcome first(const Pattern& p, const std::string& buf, size_t from, Matc
 }
 
 void Scanner::rule(int id, const std::vector<const char*>& specs, bool many) {
-  Rule r{id, {}, many, 0};
-  for (const char* s : specs) r.alts.push_back(compile(s));
+  Rule r{id, {}, many, 0, 0};
+  for (const char* s : specs) {
+    r.alts.push_back(compile(s));
+    r.anchor = std::max(r.anchor, r.alts.back().tokens[0].text.size());
+  }
   rules_.push_back(std::move(r));
 }
 
@@ -196,7 +200,11 @@ void Scanner::feed(const char* data, size_t len) {
           bm = std::move(m);
         }
       }
-      if (best == Outcome::Fail) break;
+      if (best == Outcome::Fail) {
+        size_t tail = buf_.size() >= r.anchor ? buf_.size() - r.anchor + 1 : 0;
+        r.pos = base_ + std::max(from, tail);
+        break;
+      }
       if (best == Outcome::NeedMore) {
         r.pos = base_ + bm.start;
         break;
