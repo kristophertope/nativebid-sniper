@@ -35,7 +35,9 @@ struct Clock : Platform {
     out = state;
     return !state.empty();
   }
+  int saves = 0;
   bool save_state(const std::string& d) override {
+    saves++;
     state = d;
     return true;
   }
@@ -251,6 +253,7 @@ static void timing() {
     }
   }
   expect(!overlap, "no Telegram poll runs into a bid window");
+  std::printf("    %d state writes over 700s\n", c.saves);
 }
 
 static void extension_and_restart() {

@@ -123,8 +123,13 @@ void Bot::save() {
     o["check_at"] = s.check_at;
   }
   std::string out;
-  serializeJsonPretty(doc, out);
-  if (!p_.save_state(out)) p_.log("Couldn\xE2\x80\x99t save snipes");
+  serializeJson(doc, out);
+  if (out == saved_) return;
+  if (p_.save_state(out)) {
+    saved_ = out;
+  } else {
+    p_.log("Couldn\xE2\x80\x99t save snipes");
+  }
 }
 
 Snipe* Bot::get(long id) {
@@ -263,6 +268,7 @@ Result Bot::refresh() {
     } else if (left > 0) {
       s->ends = now + left;
       s->check_at = now + std::min(30.0, std::max(1.0, left / 2));
+      continue;
     } else {
       p_.sleep(3);
       Lot final;
@@ -278,7 +284,6 @@ Result Bot::refresh() {
       drop(id);
       continue;
     }
-    save();
   }
   return {};
 }
@@ -292,7 +297,6 @@ Result Bot::bid_mode(long id) {
   if (w == Wait::Later) {
     p_.log("#" + std::to_string(id) + " was extended; leaving bid mode");
     get(id)->check_at = 0;
-    save();
     return {};
   }
   if (w == Wait::Ended) {
@@ -599,7 +603,6 @@ Result Bot::card(long id, const Lot* lot, double left, const std::string& headin
     r = nb_.time_remaining(get(id)->listing_id, left);
     if (!r.ok()) return r;
     get(id)->ends = p_.now() + left;
-    save();
     lot = &fetched;
   }
   const Snipe& s = *get(id);

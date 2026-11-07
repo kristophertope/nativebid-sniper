@@ -74,6 +74,7 @@ class Bot {
   std::map<long, int> failures_;
   long long offset_ = -1;
   long next_id_ = 1;
+  std::string saved_;
 };
 
 std::string plain(const std::string& html);
