@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import codecs
 import getpass
 import html
 import http.cookiejar
@@ -12,7 +13,6 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from html.parser import HTMLParser
 
 BASE = 'https://www.nativebid.com'
 UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36'
@@ -66,34 +66,154 @@ def duration(s):
     return ' '.join(parts[:2])
 
 
-class Forms(HTMLParser):
+CHUNK = 1024
+WINDOW = 2048
+SMALL = 8192
+NUMBER = r'\s*\$?\s*<span class="NumberPart">([\d,.]+)</span>'
+
+
+def rules(**patterns):
+    return {name: re.compile(p, re.S) for name, p in patterns.items()}
+
+
+class Scanner:
+    rules = {}
+    many = set()
+    needed = ()
+
+    def __init__(self):
+        self.found = {}
+        self.buf = ''
+        self.base = 0
+        self.pos = {}
+        self.bytes = 0
+        self.decoder = codecs.getincrementaldecoder('utf-8')('replace')
+
+    def done(self):
+        return all(name in self.found for name in self.needed)
+
+    def read(self, res):
+        while not self.done():
+            data = res.read(CHUNK)
+            if not data:
+                break
+            self.feed(data)
+        return self
+
+    def feed(self, data):
+        self.bytes += len(data)
+        self.buf += self.decoder.decode(data)
+        for name, rx in self.rules.items():
+            multi = name in self.many
+            if not multi and name in self.found:
+                continue
+            for m in rx.finditer(self.buf, max(0, self.pos.get(name, 0) - self.base)):
+                self.pos[name] = self.base + m.end()
+                self.hit(name, m, self.base + m.start())
+                if not multi:
+                    break
+        if len(self.buf) > WINDOW:
+            cut = len(self.buf) - WINDOW
+            self.buf = self.buf[cut:]
+            self.base += cut
+
+    def hit(self, name, m, at):
+        self.found[name] = m.group(1) if m.re.groups else m.group(0)
+
+
+class LotPage(Scanner):
+    rules = rules(
+        message=r'contextMessageDictionary\["(\w+)"\]\s*=\s*"((?:[^"\\]|\\.)*)"',
+        listing_id=r'(?:\bid="ListingID"[^>]*\bvalue|\bdata-listingid)="(\d+)"',
+        type=r'\bid="ListingType"[^>]*\bvalue="(\w+)"',
+        title=r'<h3 class="detail__title">(.*?)<',
+        status=r'detail__status-label[^>]*>\s*<span class="label[^"]*">([^<]*)<',
+        price=r'(?:class="[^"]*awe-rt-CurrentPrice"[^>]*>|Winning Bid:)' + NUMBER,
+        minimum=r'class="[^"]*Bidding_Listing_MinPrice[^"]*"[^>]*>' + NUMBER,
+        biddermax=r'class="([^"]*detail__biddermax[^"]*)"',
+        max_bid=r'\bid="MaxBid"[^>]*>' + NUMBER,
+        bids=r'>\s*(\d+)\s*(?:</span>)?(?:&nbsp;|\s)*Bid\(s\)',
+    )
+    many = {'message'}
+    needed = ('listing_id', 'type', 'title', 'status', 'price', 'minimum', 'biddermax', 'max_bid', 'bids')
+
     def __init__(self):
         super().__init__()
-        self.forms = []
-        self.current = None
+        self.messages = {}
 
-    def handle_starttag(self, tag, attrs):
-        a = dict(attrs)
-        if tag == 'form':
-            self.current = {'action': a.get('action') or '', 'fields': []}
-            self.forms.append(self.current)
-        elif self.current is not None and tag == 'input' and a.get('name'):
-            kind = (a.get('type') or 'text').lower()
-            if kind in ('submit', 'button', 'image', 'file', 'reset'):
-                return
-            if kind in ('checkbox', 'radio') and 'checked' not in a:
-                return
-            self.current['fields'].append((a['name'], a.get('value') or ''))
+    def hit(self, name, m, at):
+        if name == 'message':
+            self.messages[m.group(1)] = re.sub(r'\\(.)', r'\1', m.group(2))
+        else:
+            super().hit(name, m, at)
 
-    def handle_endtag(self, tag):
-        if tag == 'form':
-            self.current = None
+    def lot(self, url):
+        f = self.found
+        shown = 'biddermax' in f and 'awe-hidden' not in f['biddermax']
+        return {
+            'url': url,
+            'listing_id': f['listing_id'],
+            'type': f.get('type', 'Auction'),
+            'title': strip_tags(f.get('title', '')),
+            'price': money(f.get('price')),
+            'minimum': money(f.get('minimum')),
+            'my_max': (money(f.get('max_bid')) if shown else None) or None,
+            'status': strip_tags(f.get('status', '')),
+            'bids': int(f['bids']) if 'bids' in f else None,
+        }
 
 
-def parse_forms(body):
-    p = Forms()
-    p.feed(body)
-    return p.forms
+class ConfirmPage(Scanner):
+    rules = rules(
+        signed_in=r'/Account/Logoff',
+        logon_form=r'<form[^>]*\baction="/Account/LogOn"',
+        form=r'<form[^>]*\baction="([^"]*/Listing/Action[^"]*)"',
+        form_end=r'</form>',
+        input=r'<input\b[^>]*>',
+        total=r'including[^<]*?up to\s*(\$[\d,]+(?:\.\d+)?)(?=[\s<])',
+        error=r'class="[^"]*(?:validation-summary-errors|alert-danger|alert)[^"]*"[^>]*>(.*?)</div>',
+    )
+    many = {'form_end', 'input'}
+
+    def __init__(self):
+        super().__init__()
+        self.start = None
+        self.end = None
+        self.fields = []
+
+    def done(self):
+        return 'logon_form' in self.found or (
+            'signed_in' in self.found and self.end is not None and 'total' in self.found)
+
+    def inside(self, at):
+        return self.start is not None and at > self.start and (self.end is None or at < self.end)
+
+    def hit(self, name, m, at):
+        if name == 'form_end':
+            if self.inside(at) and self.end is None:
+                self.end = at
+        elif name == 'input':
+            if self.inside(at):
+                self.add_input(m.group(0))
+        else:
+            if name == 'form':
+                self.start = at
+            super().hit(name, m, at)
+
+    def add_input(self, tag):
+        a = {k.lower(): html.unescape(v or w)
+             for k, v, w in re.findall(r'([\w-]+)(?:\s*=\s*(?:"([^"]*)"|\'([^\']*)\'))?', tag[6:])}
+        kind = (a.get('type') or 'text').lower()
+        if not a.get('name') or kind in ('submit', 'button', 'image', 'file', 'reset'):
+            return
+        if kind in ('checkbox', 'radio') and 'checked' not in a:
+            return
+        self.fields.append((a['name'], a.get('value') or ''))
+
+
+class LoginPage(Scanner):
+    rules = rules(error=r'validation-summary-errors[^>]*>.*?<li[^>]*>(.*?)</li>')
+    needed = ('error',)
 
 
 class NativeBid:
@@ -107,17 +227,24 @@ class NativeBid:
         )
         self.messages = {}
 
-    def request(self, path, data=None, headers=None, timeout=20):
+    def open(self, path, data=None, headers=None, timeout=20):
         url = urllib.parse.urljoin(BASE, path)
         req = urllib.request.Request(url, data=data, headers={'User-Agent': UA, **(headers or {})})
         try:
-            with self.opener.open(req, timeout=timeout) as res:
-                return res.geturl(), res.status, res.read().decode('utf-8', 'replace')
+            return self.opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as e:
-            return e.geturl(), e.code, e.read().decode('utf-8', 'replace')
+            return e
+
+    def scan(self, path, page, **kw):
+        with self.open(path, **kw) as res:
+            return res.geturl(), res.getcode(), page.read(res)
+
+    def small(self, path, **kw):
+        with self.open(path, **kw) as res:
+            return res.geturl(), res.getcode(), res.read(SMALL).decode('utf-8', 'replace')
 
     def time_remaining(self, listing_id):
-        _, status, body = self.request(
+        _, status, body = self.small(
             '/RealTime/GetTimeRemaining',
             data=json.dumps({'listingId': int(listing_id)}).encode(),
             headers={'Content-Type': 'application/json'},
@@ -137,37 +264,11 @@ class NativeBid:
             f'/Event/LotDetails/{ref}',
         ]
         for path in candidates:
-            url, status, body = self.request(path)
-            m = re.search(r'<input[^>]*\bid="ListingID"[^>]*\bvalue="(\d+)"', body)
-            if status == 200 and m:
-                return self.parse_lot(url, body, m.group(1))
+            url, status, page = self.scan(path, LotPage())
+            if status == 200 and 'listing_id' in page.found:
+                self.messages.update(page.messages)
+                return page.lot(url)
         raise SnipeError(f'Couldn’t find a NativeBid lot for {ref!r}')
-
-    def parse_lot(self, url, body, listing_id):
-        for k, v in re.findall(r'contextMessageDictionary\["(\w+)"\]\s*=\s*"((?:[^"\\]|\\.)*)"', body):
-            self.messages[k] = re.sub(r'\\(.)', r'\1', v)
-
-        def number(pattern):
-            m = re.search(pattern + r'[^>]*>\s*\$?\s*<span class="NumberPart">([\d,.]+)</span>', body)
-            return money(m.group(1)) if m else None
-
-        title = re.search(r'<h3 class="detail__title">(.*?)<', body, re.S)
-        kind = re.search(r'<input[^>]*\bid="ListingType"[^>]*\bvalue="(\w+)"', body)
-        status = re.search(r'detail__status-label[^>]*>\s*<span class="label[^"]*">([^<]*)<', body)
-        biddermax = re.search(r'class="[^"]*detail__biddermax[^"]*"', body)
-        bids = re.search(r'awe-rt-AcceptedListingActionCount"[^>]*>(\d+)<', body)
-        my_max = number(r'id="MaxBid"') if biddermax and 'awe-hidden' not in biddermax.group(0) else None
-        return {
-            'url': url,
-            'listing_id': listing_id,
-            'type': kind.group(1) if kind else 'Auction',
-            'title': strip_tags(title.group(1)) if title else '',
-            'price': number(r'class="[^"]*awe-rt-CurrentPrice"'),
-            'minimum': number(r'class="[^"]*Bidding_Listing_MinPrice[^"]*"'),
-            'my_max': my_max or None,
-            'status': strip_tags(status.group(1)) if status else '',
-            'bids': int(bids.group(1)) if bids else None,
-        }
 
     def login(self):
         if not self.user or not self.password:
@@ -178,11 +279,11 @@ class NativeBid:
             'rememberMe': 'false',
             'returnUrl': '',
         }).encode()
-        url, status, body = self.request('/Account/LogOn', data=data,
-                                         headers={'Content-Type': 'application/x-www-form-urlencoded'})
-        if '/Account/LogOn' in url or status >= 400:
-            err = re.search(r'validation-summary-errors[^>]*>.*?<li[^>]*>(.*?)</li>', body, re.S)
-            raise SnipeError('Sign-in failed' + (f': {strip_tags(err.group(1))}' if err else '.'))
+        with self.open('/Account/LogOn', data=data,
+                       headers={'Content-Type': 'application/x-www-form-urlencoded'}) as res:
+            if '/Account/LogOn' in res.geturl() or res.getcode() >= 400:
+                err = LoginPage().read(res).found.get('error')
+                raise SnipeError('Sign-in failed' + (f': {strip_tags(err)}' if err else '.'))
         log(f'Signed in as {self.user}')
 
     def confirm(self, lot, amount):
@@ -191,24 +292,21 @@ class NativeBid:
             'ListingType': lot['type'],
             'BidAmount': f'{amount:.2f}',
         })
-        _, status, body = self.request(f'/Listing/ConfirmAction?{query}')
+        _, status, page = self.scan(f'/Listing/ConfirmAction?{query}', ConfirmPage())
         if status != 200:
             raise SnipeError(f'ConfirmAction returned HTTP {status}')
-        forms = parse_forms(body)
-        if any('/Account/LogOn' in f['action'] for f in forms):
+        if 'logon_form' in page.found:
             raise NotSignedIn()
-        form = next((f for f in forms if '/Listing/Action' in f['action']), None)
-        if not form:
-            err = re.search(r'class="[^"]*(?:validation-summary-errors|alert-danger|alert)[^"]*"[^>]*>(.*?)</div>', body, re.S)
-            raise SnipeError('NativeBid didn’t accept that bid' + (f': {strip_tags(err.group(1))}' if err else '.'))
-        fields = dict(form['fields'])
+        if 'form' not in page.found:
+            err = page.found.get('error')
+            raise SnipeError('NativeBid didn’t accept that bid' + (f': {strip_tags(err)}' if err else '.'))
+        fields = dict(page.fields)
         if money(fields.get('BidAmount')) != round(amount, 2) or fields.get('ListingID') != lot['listing_id']:
             raise SnipeError('NativeBid’s confirmation didn’t match this bid, so nothing was placed.')
-        total = re.search(r'including[^<]*?up to\s*(\$[\d,]+(?:\.\d+)?)', strip_tags(body), re.I)
-        return form['action'], urllib.parse.urlencode(form['fields']), total.group(1) if total else None
+        return page.found['form'], urllib.parse.urlencode(page.fields), page.found.get('total')
 
     def place(self, action, params):
-        _, status, body = self.request(f'{action}?{params}', headers={
+        _, status, body = self.small(f'{action}?{params}', headers={
             'X-Requested-With': 'XMLHttpRequest',
             'Accept': 'application/json',
         })
