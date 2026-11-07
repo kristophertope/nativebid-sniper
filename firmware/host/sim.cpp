@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <functional>
 #include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -53,6 +54,8 @@ struct FakeNB : NativeBid {
   Clock& c;
   std::map<std::string, FakeLot> lots;
   std::vector<std::string> events;
+  std::map<std::string, int> checks;
+  std::set<std::string> broken;
   explicit FakeNB(Clock& c) : NativeBid(c, "u", "p"), c(c) {}
   static std::string url(const std::string& key) {
     return key == "X" ? "https://www.nativebid.com/Event/LotDetails/266333831/x" : "url" + key;
@@ -82,6 +85,8 @@ struct FakeNB : NativeBid {
     return {};
   }
   Result time_remaining(const std::string& id, double& left) override {
+    checks[id]++;
+    if (broken.count(id)) return Result::site("GetTimeRemaining error: ERROR_NOT_FOUND");
     for (auto& kv : lots) {
       if (kv.second.id == id) {
         left = std::max(0.0, kv.second.ends - c.t);
@@ -374,7 +379,29 @@ static void buttons_and_html() {
   std::printf("      %s\n", sample.c_str());
 }
 
+static void broken_snipe() {
+  std::printf("\nscenario: one snipe's lot starts failing while another is due\n");
+  Clock c;
+  FakeNB nb(c);
+  FakeTG tg(c);
+  nb.lots["F"] = {"1", c.t + 100, 2.0, nullptr};
+  nb.lots["G"] = {"2", c.t + 400, 2.0, nullptr};
+  tg.inbox = {{1, 42, "/snipe F 5"}, {2, 42, "/snipe G 5"}};
+  Bot bot(c, nb, tg);
+  bot.start();
+  run_until(bot, c, 50);
+  expect(nb.lots["F"].placed, "F's bid placed before it breaks");
+  nb.broken.insert("1");
+  int before = nb.checks["1"];
+  run_until(bot, c, 600);
+  expect(nb.lots["G"].placed && std::fabs(nb.lots["G"].placed_left - 60) < 0.01,
+         "G still bids on time while F's checks fail");
+  int calls = nb.checks["1"] - before;
+  expect(calls > 0 && calls <= 20, "F's failing check backs off to every 30s (" + std::to_string(calls) + " tries in 550s)");
+}
+
 int main() {
+  broken_snipe();
   timing();
   extension_and_restart();
   buttons_and_html();

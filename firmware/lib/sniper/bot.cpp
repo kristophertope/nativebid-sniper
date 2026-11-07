@@ -233,6 +233,12 @@ void Bot::missed(long id) {
   drop(id);
 }
 
+void Bot::retry_later(long id, const Result& r) {
+  p_.log("Couldn’t check #" + std::to_string(id) + " (" + r.msg + "); trying again in 30s");
+  Snipe* s = get(id);
+  if (s) s->check_at = p_.now() + 30;
+}
+
 Result Bot::refresh() {
   std::vector<long> ids;
   for (const auto& s : snipes) ids.push_back(s.id);
@@ -241,7 +247,10 @@ Result Bot::refresh() {
     if (!s || p_.now() < s->check_at) continue;
     double left = 0;
     Result r = nb_.time_remaining(s->listing_id, left);
-    if (!r.ok()) return r;
+    if (!r.ok()) {
+      retry_later(id, r);
+      continue;
+    }
     double now = p_.now();
     s = get(id);
     if (s->state == "pending") {
@@ -258,7 +267,10 @@ Result Bot::refresh() {
       p_.sleep(3);
       Lot final;
       r = nb_.lot(s->url, final);
-      if (!r.ok()) return r;
+      if (!r.ok()) {
+        retry_later(id, r);
+        continue;
+      }
       s = get(id);
       say("🏁 <b>Lot ended</b> · #" + std::to_string(id) + "\n" + link(s->url, s->title) + "\n\n<b>" +
           esc(final.status.empty() ? "Ended" : final.status) + "</b> at <b>" + fmt(final.price) + "</b>\nYour max: " +

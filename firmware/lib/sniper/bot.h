@@ -50,6 +50,7 @@ class Bot {
   size_t pending() const;
   double next_event();
   Result refresh();
+  void retry_later(long id, const Result& r);
   Result bid_mode(long id);
   void missed(long id);
   Result poll(int wait);
