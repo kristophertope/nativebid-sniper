@@ -157,13 +157,16 @@ static Outcome first(const Pattern& p, const std::string& buf, size_t from, Matc
   }
 }
 
-void Scanner::rule(int id, const std::vector<const char*>& specs, bool many) {
-  Rule r{id, {}, many, 0, 0};
-  for (const char* s : specs) {
-    r.alts.push_back(compile(s));
-    r.anchor = std::max(r.anchor, r.alts.back().tokens[0].text.size());
-  }
-  rules_.push_back(std::move(r));
+std::vector<Pattern> compile_all(const std::vector<const char*>& specs) {
+  std::vector<Pattern> out;
+  for (const char* s : specs) out.push_back(compile(s));
+  return out;
+}
+
+void Scanner::rule(int id, const std::vector<Pattern>& alts, bool many) {
+  Rule r{id, &alts, many, 0, 0};
+  for (const auto& a : alts) r.anchor = std::max(r.anchor, a.tokens[0].text.size());
+  rules_.push_back(r);
 }
 
 bool Scanner::done() const {
@@ -192,7 +195,7 @@ void Scanner::feed(const char* data, size_t len) {
       size_t from = r.pos > base_ ? r.pos - base_ : 0;
       Outcome best = Outcome::Fail;
       Match bm;
-      for (const auto& alt : r.alts) {
+      for (const auto& alt : *r.alts) {
         Match m;
         Outcome o = first(alt, buf_, from, m);
         if (o != Outcome::Fail && (best == Outcome::Fail || m.start < bm.start)) {

@@ -8,16 +8,26 @@ namespace sniper {
 #define NUMBER "%s%?$%s<span class=\"NumberPart\">%n</span>"
 
 LotPage::LotPage() {
-  rule(R_MESSAGE, {"contextMessageDictionary[\"%w\"]%s=%s\"%q\""}, true);
-  rule(R_LISTING_ID, {"id=\"ListingID\"%*>value=\"%d\"", "data-listingid=\"%d\""});
-  rule(R_TYPE, {"id=\"ListingType\"%*>value=\"%w\""});
-  rule(R_TITLE, {"<h3 class=\"detail__title\">%^<<"});
-  rule(R_STATUS, {"detail__status-label%*>>%s<span class=\"label%*\"\">%^<<"});
-  rule(R_PRICE, {"awe-rt-CurrentPrice\"%*>>" NUMBER, "Winning Bid:" NUMBER});
-  rule(R_MINIMUM, {"Bidding_Listing_MinPrice%*\"\"%*>>" NUMBER});
-  rule(R_BIDDERMAX, {"detail__biddermax%^\"\""});
-  rule(R_MAX_BID, {"id=\"MaxBid\"%*>>" NUMBER});
-  rule(R_BIDS, {">%s%d%s</span>%bBid(s)", ">%s%d%bBid(s)"});
+  static const auto message = compile_all({"contextMessageDictionary[\"%w\"]%s=%s\"%q\""});
+  rule(R_MESSAGE, message, true);
+  static const auto listing_id = compile_all({"id=\"ListingID\"%*>value=\"%d\"", "data-listingid=\"%d\""});
+  rule(R_LISTING_ID, listing_id);
+  static const auto type = compile_all({"id=\"ListingType\"%*>value=\"%w\""});
+  rule(R_TYPE, type);
+  static const auto title = compile_all({"<h3 class=\"detail__title\">%^<<"});
+  rule(R_TITLE, title);
+  static const auto status = compile_all({"detail__status-label%*>>%s<span class=\"label%*\"\">%^<<"});
+  rule(R_STATUS, status);
+  static const auto price = compile_all({"awe-rt-CurrentPrice\"%*>>" NUMBER, "Winning Bid:" NUMBER});
+  rule(R_PRICE, price);
+  static const auto minimum = compile_all({"Bidding_Listing_MinPrice%*\"\"%*>>" NUMBER});
+  rule(R_MINIMUM, minimum);
+  static const auto biddermax = compile_all({"detail__biddermax%^\"\""});
+  rule(R_BIDDERMAX, biddermax);
+  static const auto max_bid = compile_all({"id=\"MaxBid\"%*>>" NUMBER});
+  rule(R_MAX_BID, max_bid);
+  static const auto bids = compile_all({">%s%d%s</span>%bBid(s)", ">%s%d%bBid(s)"});
+  rule(R_BIDS, bids);
   needed_ = {R_LISTING_ID, R_TYPE, R_TITLE, R_STATUS, R_PRICE, R_MINIMUM, R_BIDDERMAX, R_MAX_BID, R_BIDS};
 }
 
@@ -50,12 +60,18 @@ Lot LotPage::lot(const std::string& url) const {
 }
 
 ConfirmPage::ConfirmPage() {
-  rule(R_SIGNED_IN, {"/Account/Logoff"});
-  rule(R_FORM, {"<form%*>action=\"%^\"\""}, true);
-  rule(R_FORM_END, {"</form>"}, true);
-  rule(R_INPUT, {"<input%^>>"}, true);
-  rule(R_TOTAL, {"including%*<up to%s$%n"});
-  rule(R_ERROR, {"class=\"%*\"alert%*\"\"%*>>%c</div>", "class=\"%*\"validation-summary-errors%*\"\"%*>>%c</div>"});
+  static const auto signed_in = compile_all({"/Account/Logoff"});
+  rule(R_SIGNED_IN, signed_in);
+  static const auto form = compile_all({"<form%*>action=\"%^\"\""});
+  rule(R_FORM, form, true);
+  static const auto form_end = compile_all({"</form>"});
+  rule(R_FORM_END, form_end, true);
+  static const auto input = compile_all({"<input%^>>"});
+  rule(R_INPUT, input, true);
+  static const auto total = compile_all({"including%*<up to%s$%n"});
+  rule(R_TOTAL, total);
+  static const auto error = compile_all({"class=\"%*\"alert%*\"\"%*>>%c</div>", "class=\"%*\"validation-summary-errors%*\"\"%*>>%c</div>"});
+  rule(R_ERROR, error);
 }
 
 bool ConfirmPage::done() const {
@@ -131,7 +147,8 @@ void ConfirmPage::add_input(const std::string& s) {
 }
 
 LoginPage::LoginPage() {
-  rule(R_ERROR, {"validation-summary-errors%*>>%.<li%*>>%c</li>"});
+  static const auto error = compile_all({"validation-summary-errors%*>>%.<li%*>>%c</li>"});
+  rule(R_ERROR, error);
   needed_ = {R_ERROR};
 }
 

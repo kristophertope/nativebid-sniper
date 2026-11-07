@@ -21,6 +21,7 @@ struct Pattern {
 };
 
 Pattern compile(const char* spec);
+std::vector<Pattern> compile_all(const std::vector<const char*>& specs);
 
 struct Match {
   size_t start = 0;
@@ -43,7 +44,7 @@ class Scanner {
   size_t peak() const { return peak_; }
 
  protected:
-  void rule(int id, const std::vector<const char*>& specs, bool many = false);
+  void rule(int id, const std::vector<Pattern>& alts, bool many = false);
   virtual void hit(int id, const Match& m, size_t at, const std::string& buf);
   std::map<int, std::string> found_;
   std::vector<int> needed_;
@@ -51,7 +52,7 @@ class Scanner {
  private:
   struct Rule {
     int id;
-    std::vector<Pattern> alts;
+    const std::vector<Pattern>* alts;
     bool many;
     size_t pos;
     size_t anchor;
