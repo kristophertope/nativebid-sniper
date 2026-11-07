@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <deque>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,7 @@ class Bot {
   NativeBid& nb_;
   Telegram& tg_;
   std::deque<Outgoing> outbox_;
+  std::map<long, int> failures_;
   long long offset_ = -1;
   long next_id_ = 1;
 };

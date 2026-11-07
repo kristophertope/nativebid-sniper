@@ -302,7 +302,18 @@ Result Bot::bid_mode(long id) {
   bool ok = false;
   std::string message;
   r = fire(p_, nb_, snap.url, snap.max, ok, message);
-  if (!r.ok()) return r;
+  if (!r.ok()) {
+    int attempt = ++failures_[id];
+    if (attempt < 3) {
+      p_.log("Bid attempt " + std::to_string(attempt) + " for #" + std::to_string(id) + " failed (" + r.msg +
+             "); trying again");
+      p_.sleep(2);
+      return {};
+    }
+    ok = false;
+    message = r.msg;
+  }
+  failures_.erase(id);
   p_.log((ok ? "\xE2\x9C\x93 " : "\xE2\x9C\x97 ") + message);
   std::string title = link(snap.url, snap.title);
   if (ok) {

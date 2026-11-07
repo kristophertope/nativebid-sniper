@@ -101,8 +101,14 @@ struct FakeNB : NativeBid {
     events.push_back("login");
     return {};
   }
+  int confirms = 0;
+  std::string confirm_error;
   Result confirm(const Lot& lot, double amount, std::string& action, std::string& params, std::string& total) override {
     (void)lot;
+    if (!confirm_error.empty() && c.t - 1000000 > 30) {
+      confirms++;
+      return Result::site(confirm_error);
+    }
     action = "/Listing/Action";
     params = "x";
     char buf[32];
@@ -400,7 +406,25 @@ static void broken_snipe() {
   expect(calls > 0 && calls <= 20, "F's failing check backs off to every 30s (" + std::to_string(calls) + " tries in 550s)");
 }
 
+static void failing_bid() {
+  std::printf("\nscenario: NativeBid rejects the bid at bid time\n");
+  Clock c;
+  FakeNB nb(c);
+  FakeTG tg(c);
+  nb.lots["H"] = {"1", c.t + 300, 2.0, nullptr};
+  nb.confirm_error = "NativeBid didn’t accept that bid: Bidding is closed";
+  tg.inbox = {{1, 42, "/snipe H 5"}};
+  Bot bot(c, nb, tg);
+  bot.start();
+  run_until(bot, c, 400);
+  expect(nb.confirms == 3, "tries the bid 3 times (" + std::to_string(nb.confirms) + ")");
+  expect(sent_with(tg, "Bid failed</b> · #1") && sent_with(tg, "Bidding is closed"), "reports Bid failed with the reason");
+  expect(!sent_with(tg, "Snipe missed"), "doesn't claim the snipe was missed");
+  expect(bot.snipes.empty(), "the failed snipe is removed");
+}
+
 int main() {
+  failing_bid();
   broken_snipe();
   timing();
   extension_and_restart();
