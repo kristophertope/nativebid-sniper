@@ -334,12 +334,16 @@ def notify(topic, title, message):
         log(f'Notification failed: {e}')
 
 
+def summary(lot, left=None):
+    return (f'{lot["status"] or "Status unknown"} · current {fmt(lot["price"])} · next bid {fmt(lot["minimum"])}'
+            f' · {lot["bids"] if lot["bids"] is not None else "?"} bids'
+            + (f' · your max {fmt(lot["my_max"])}' if lot['my_max'] else '')
+            + (f' · ends in {duration(left)}' if left is not None else ''))
+
+
 def describe(lot, left=None):
     log(f'Lot {lot["listing_id"]}: {lot["title"]}')
-    log(f'  {lot["status"] or "Status unknown"} · current {fmt(lot["price"])} · next bid {fmt(lot["minimum"])}'
-        f' · {lot["bids"] if lot["bids"] is not None else "?"} bids'
-        + (f' · your max {fmt(lot["my_max"])}' if lot['my_max'] else '')
-        + (f' · ends in {duration(left)}' if left is not None else ''))
+    log(f'  {summary(lot, left)}')
 
 
 def retrying(fn, attempts=5, delay=2):
@@ -353,13 +357,15 @@ def retrying(fn, attempts=5, delay=2):
             time.sleep(delay)
 
 
-def wait_for(nb, lot, lead):
+def wait_for(nb, listing_id, lead, give_up=None):
     signed_in_again = False
     while True:
-        left = retrying(lambda: nb.time_remaining(lot['listing_id']))
+        left = retrying(lambda: nb.time_remaining(listing_id))
         if left <= 0:
             return False
         until_fire = left - lead
+        if give_up is not None and until_fire > give_up:
+            return None
         if until_fire <= 1.5:
             time.sleep(max(0, until_fire))
             return True
@@ -438,7 +444,7 @@ def cmd_snipe(args):
         + ('placing now' if args.now else f'{LEAD}s before the end'))
     notify(topic, 'Snipe scheduled', f'{lot["title"][:80]}\nMax {fmt(args.max)}, ends in {duration(left)}')
 
-    if not args.now and not wait_for(nb, lot, LEAD):
+    if not args.now and not wait_for(nb, lot['listing_id'], LEAD):
         log('Lot ended before the bid time')
         notify(topic, 'Snipe missed', f'{lot["title"][:80]} ended before the bid was placed')
         return 1
@@ -451,6 +457,460 @@ def cmd_snipe(args):
     if not args.now:
         follow_up(nb, lot, topic)
     return 0
+
+
+BID_WINDOW = 15
+STATE = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'snipes.json')
+HELP = ('<b>Commands</b>\n'
+        '/snipe or /s <i>lot max</i> – set or change a snipe\n'
+        '/list or /l – your snipes\n'
+        '/cancel or /c <i># or lot</i> – cancel a snipe\n'
+        '/info or /i <i>lot</i> – price and time left\n\n'
+        '<i>lot</i> is a lot link or number, e.g.\n'
+        '<code>/snipe 266333831 10</code>')
+USAGE = {
+    '/snipe': (2, '/snipe <lot> <max>, e.g. /snipe 266333831 10'),
+    '/list': (0, '/list'),
+    '/cancel': (1, '/cancel <# or lot>, e.g. /cancel 2 or /cancel 266333831'),
+    '/info': (1, '/info <lot>'),
+}
+ALIASES = {'/s': '/snipe', '/l': '/list', '/c': '/cancel', '/i': '/info'}
+NETWORK = (urllib.error.URLError, TimeoutError, ConnectionError, OSError)
+
+
+def esc(s):
+    return html.escape(str(s), quote=False)
+
+
+def link(url, title):
+    return f'<a href="{html.escape(url)}">{esc(title[:100] or "Lot")}</a>'
+
+
+def plain(text):
+    return html.unescape(re.sub(r'<[^>]+>', '', text))
+
+
+def button(label, data):
+    return {'text': label, 'callback_data': data}
+
+
+def when(t):
+    return time.strftime('%a %b %-d, %-I:%M:%S %p', time.localtime(t))
+
+
+def prices(lot):
+    bids = lot['bids'] if lot['bids'] is not None else '?'
+    return f'Current <b>{fmt(lot["price"])}</b> · Next bid <b>{fmt(lot["minimum"])}</b> · {bids} bids'
+
+
+class Telegram:
+    def __init__(self, token, chat_id):
+        self.url = f'https://api.telegram.org/bot{token}/'
+        self.chat_id = int(chat_id)
+
+    def call(self, method, params, wait=15):
+        req = urllib.request.Request(self.url + method, data=json.dumps(params).encode(),
+                                     headers={'Content-Type': 'application/json'})
+        try:
+            with urllib.request.urlopen(req, timeout=wait, context=TLS) as res:
+                return json.loads(res.read().decode('utf-8', 'replace'))['result']
+        except urllib.error.HTTPError as e:
+            try:
+                reason = json.loads(e.read().decode('utf-8', 'replace')).get('description')
+            except ValueError:
+                reason = None
+            if e.code == 409:
+                log('Telegram conflict: something else is reading this bot’s messages')
+            raise SnipeError(f'Telegram {method} failed (HTTP {e.code}): {reason or "no details"}')
+
+    def send(self, text, buttons=None, edit=None):
+        params = {'chat_id': self.chat_id, 'text': text[:4000], 'parse_mode': 'HTML',
+                  'link_preview_options': {'is_disabled': True}}
+        if buttons is not None:
+            params['reply_markup'] = {'inline_keyboard': buttons}
+        if not edit:
+            self.call('sendMessage', params)
+            return
+        try:
+            self.call('editMessageText', {**params, 'message_id': edit})
+        except SnipeError as e:
+            if 'not modified' not in str(e):
+                raise
+
+    def answer(self, query_id, text=None, alert=False):
+        params = {'callback_query_id': query_id}
+        if text:
+            params.update(text=text[:200], show_alert=alert)
+        self.call('answerCallbackQuery', params)
+
+    def updates(self, offset, wait):
+        params = {'timeout': wait, 'limit': 5, 'allowed_updates': ['message', 'callback_query']}
+        if offset is not None:
+            params['offset'] = offset
+        return self.call('getUpdates', params, wait=wait + 15)
+
+
+class Bot:
+    def __init__(self, nb, tg):
+        self.nb = nb
+        self.tg = tg
+        self.outbox = []
+        try:
+            with open(STATE) as f:
+                self.state = json.load(f)
+        except FileNotFoundError:
+            self.state = {'offset': None, 'next_id': 1, 'snipes': []}
+
+    @property
+    def snipes(self):
+        return self.state['snipes']
+
+    def pending(self):
+        return [s for s in self.snipes if s['state'] == 'pending']
+
+    def save(self):
+        tmp = STATE + '.tmp'
+        with open(tmp, 'w') as f:
+            json.dump(self.state, f, indent=1)
+        os.replace(tmp, STATE)
+
+    def say(self, text, buttons=None, edit=None):
+        log('→ ' + plain(text).replace('\n', ' | '))
+        self.outbox.append((text, buttons, edit))
+
+    def flush(self):
+        while self.outbox:
+            text, buttons, edit = self.outbox[0]
+            try:
+                self.tg.send(text, buttons, edit)
+            except SnipeError as e:
+                if 'HTTP 400' not in str(e):
+                    raise
+                log(f'{e}; sending as plain text')
+                self.tg.call('sendMessage', {'chat_id': self.tg.chat_id, 'text': plain(text)[:4000]})
+            self.outbox.pop(0)
+
+    def drop(self, snipe):
+        self.snipes.remove(snipe)
+        self.save()
+
+    def find(self, ref):
+        ref = str(ref).strip()
+        sid = ref[1:] if ref.startswith('#') else ref
+        s = next((s for s in self.snipes if str(s['id']) == sid), None)
+        if not s and not ref.startswith('#'):
+            s = self.by_lot(ref)
+        if not s:
+            raise SnipeError(f'There’s no snipe matching {ref}. Send /list to see your snipes.')
+        if s['state'] != 'pending':
+            raise SnipeError(f'Snipe #{s["id"]}’s bid has already been placed.')
+        return s
+
+    def by_lot(self, ref):
+        numbers = set(re.findall(r'\d{5,}', ref))
+        for s in self.snipes:
+            if numbers & ({s['listing_id']} | set(re.findall(r'\d{5,}', s['url']))):
+                return s
+        if not numbers and not ref.startswith(('http', '/')):
+            return None
+        try:
+            listing_id = self.nb.lot(ref)['listing_id']
+        except SnipeError:
+            return None
+        return next((s for s in self.snipes if s['listing_id'] == listing_id), None)
+
+    def run(self):
+        self.nb.login()
+        count = len(self.pending())
+        self.say(f'🤖 <b>Bot started</b> · {count} snipe{"" if count == 1 else "s"} pending\n\n{HELP}')
+        while True:
+            try:
+                self.tick()
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                log(f'Error: {e}')
+                time.sleep(5)
+
+    def tick(self):
+        self.refresh()
+        now = time.time()
+        due = [s for s in self.pending() if now >= s['ends'] - LEAD - BID_WINDOW]
+        if due:
+            self.bid_mode(min(due, key=lambda s: s['ends']))
+            return
+        self.flush()
+        wait = self.next_event() - time.time()
+        if wait < 1:
+            time.sleep(max(0, wait))
+            return
+        self.poll(int(min(25, wait)))
+
+    def next_event(self):
+        times = [time.time() + 25]
+        for s in self.snipes:
+            if s['state'] == 'pending':
+                times += [s['ends'] - LEAD - BID_WINDOW, s['check_at']]
+            elif s['state'] == 'placed':
+                times.append(s['check_at'])
+        return min(times)
+
+    def missed(self, s):
+        self.say(f'⚠️ <b>Snipe missed</b> · #{s["id"]}\n{link(s["url"], s["title"])}\n\n'
+                 'The lot ended before the bid went out.')
+        self.drop(s)
+
+    def refresh(self):
+        now = time.time()
+        for s in list(self.snipes):
+            if now < s['check_at']:
+                continue
+            left = self.nb.time_remaining(s['listing_id'])
+            now = time.time()
+            if s['state'] == 'pending':
+                if left <= 0:
+                    self.missed(s)
+                    continue
+                s['ends'] = now + left
+                s['check_at'] = now + min(300, max(5, (left - LEAD - BID_WINDOW) / 2))
+            elif left > 0:
+                s['ends'] = now + left
+                s['check_at'] = now + min(30, max(1, left / 2))
+            else:
+                time.sleep(3)
+                final = self.nb.lot(s['url'])
+                self.say(f'🏁 <b>Lot ended</b> · #{s["id"]}\n{link(s["url"], s["title"])}\n\n'
+                         f'<b>{esc(final["status"] or "Ended")}</b> at <b>{fmt(final["price"])}</b>\n'
+                         f'Your max: {fmt(s["max"])}')
+                self.drop(s)
+                continue
+            self.save()
+
+    def bid_mode(self, s):
+        log(f'Bid mode for #{s["id"]}; Telegram paused')
+        ready = wait_for(self.nb, s['listing_id'], LEAD, give_up=BID_WINDOW * 2)
+        if ready is None:
+            log(f'#{s["id"]} was extended; leaving bid mode')
+            s['check_at'] = 0
+            self.save()
+            return
+        if not ready:
+            self.missed(s)
+            return
+        ok, message = fire(self.nb, {'url': s['url']}, s['max'])
+        log(('✓ ' if ok else '✗ ') + message)
+        title = link(s['url'], s['title'])
+        if ok:
+            self.say(f'✅ <b>Bid placed</b> · #{s["id"]}\n{title}\n\n'
+                     f'Your max: <b>{fmt(s["max"])}</b>\n<i>NativeBid: {esc(message)}</i>')
+            s['state'] = 'placed'
+            s['check_at'] = time.time() + LEAD
+            self.save()
+        else:
+            self.say(f'❌ <b>Bid failed</b> · #{s["id"]}\n{title}\n\n<b>{esc(message)}</b>')
+            self.drop(s)
+
+    def poll(self, wait):
+        for u in self.tg.updates(self.state['offset'], wait):
+            self.state['offset'] = u['update_id'] + 1
+            self.save()
+            if 'callback_query' in u:
+                q = u['callback_query']
+                if (q.get('from') or {}).get('id') != self.tg.chat_id:
+                    log(f'Ignored a button press from {(q.get("from") or {}).get("id")}')
+                    continue
+                log(f'← [button] {q.get("data")}')
+                self.press(q)
+            else:
+                m = u.get('message') or {}
+                chat = (m.get('chat') or {}).get('id')
+                if chat != self.tg.chat_id:
+                    log(f'Ignored a message from chat {chat}')
+                    continue
+                log(f'← {m.get("text") or ""}')
+                self.handle(m.get('text') or '')
+            self.flush()
+
+    def handle(self, text):
+        parts = text.split()
+        cmd = parts[0].split('@')[0].lower() if parts else ''
+        cmd = ALIASES.get(cmd, cmd)
+        args = parts[1:]
+        try:
+            if cmd in ('/start', '/help') or not cmd.startswith('/'):
+                self.say(HELP)
+                return
+            if cmd not in USAGE:
+                self.say(f'❌ I don’t know <b>{esc(parts[0])}</b>.\n\n{HELP}')
+                return
+            count, form = USAGE[cmd]
+            if len(args) != count:
+                extra = f' I didn’t understand "{" ".join(args[count:])}".' if len(args) > count else ''
+                raise SnipeError(f'Usage: {form}.{extra}')
+            if cmd == '/snipe':
+                max_bid = money(args[1])
+                if not max_bid or max_bid <= 0:
+                    raise SnipeError(f'"{args[1]}" isn’t a dollar amount. Usage: {form}')
+                self.add(args[0], max_bid)
+            elif cmd == '/list':
+                self.show()
+            elif cmd == '/cancel':
+                self.cancel(args[0])
+            else:
+                self.info(args[0])
+        except SnipeError as e:
+            self.say(f'❌ {esc(e)}')
+        except NETWORK as e:
+            self.say(f'❌ Couldn’t reach NativeBid ({esc(e)}). Try again.')
+
+    def press(self, q):
+        msg = (q.get('message') or {}).get('message_id')
+        kind, _, rest = (q.get('data') or '').partition(':')
+        note = None
+        try:
+            if kind == 'bump':
+                sid, delta = rest.split(':')
+                s = self.find(sid)
+                self.add(s['url'], round(s['max'] + float(delta), 2), edit=msg)
+                note = f'Max is now {fmt(s["max"])}'
+            elif kind == 'card':
+                self.card(self.find(rest), edit=msg)
+            elif kind == 'open':
+                self.card(self.find(rest))
+            elif kind == 'cancel':
+                self.cancel(rest, edit=msg)
+                note = f'Snipe #{rest} cancelled'
+            elif kind == 'listcancel':
+                self.cancel(rest, quiet=True)
+                self.show(edit=msg)
+                note = f'Snipe #{rest} cancelled'
+            elif kind == 'list':
+                self.show(edit=msg)
+            elif kind == 'info':
+                self.info(rest, edit=msg)
+            self.tg.answer(q['id'], note)
+        except SnipeError as e:
+            self.tg.answer(q['id'], str(e), alert=True)
+        except NETWORK as e:
+            self.tg.answer(q['id'], f'Couldn’t reach NativeBid ({e}). Try again.', alert=True)
+
+    def confirm(self, lot, amount):
+        try:
+            return self.nb.confirm(lot, amount)[2]
+        except NotSignedIn:
+            self.nb.login()
+            return self.nb.confirm(lot, amount)[2]
+
+    def add(self, ref, max_bid, edit=None):
+        if not max_bid or max_bid <= 0:
+            raise SnipeError(f'Usage: {USAGE["/snipe"][1]}')
+        lot = self.nb.lot(ref)
+        left = self.nb.time_remaining(lot['listing_id'])
+        if left <= 0:
+            raise SnipeError('That lot has already ended.')
+        if lot['minimum'] is not None and max_bid < lot['minimum']:
+            raise SnipeError(f'Your max {fmt(max_bid)} is below the next bid {fmt(lot["minimum"])}.')
+        same = next((s for s in self.snipes if s['listing_id'] == lot['listing_id']), None)
+        if same and same['state'] != 'pending':
+            raise SnipeError(f'Snipe #{same["id"]}’s bid of {fmt(same["max"])} has already been placed, '
+                             'so it can’t be changed here.')
+        if same and same['max'] == max_bid:
+            raise SnipeError(f'Snipe #{same["id"]} is already set to {fmt(max_bid)}.')
+        total = self.confirm(lot, max_bid)
+        now = time.time()
+        if same:
+            old = same['max']
+            same.update(max=max_bid, total=total, ends=now + left)
+            self.save()
+            self.card(same, lot, left, f'✏️ <b>Snipe #{same["id"]} updated</b>', old, edit)
+            return
+        s = {
+            'id': self.state['next_id'],
+            'url': lot['url'],
+            'listing_id': lot['listing_id'],
+            'title': lot['title'],
+            'max': max_bid,
+            'total': total,
+            'state': 'pending',
+            'ends': now + left,
+            'check_at': now + min(300, max(5, (left - LEAD - BID_WINDOW) / 2)),
+        }
+        self.state['next_id'] += 1
+        self.snipes.append(s)
+        self.save()
+        self.card(s, lot, left, f'🎯 <b>Snipe #{s["id"]} scheduled</b>', edit=edit)
+
+    def card(self, s, lot=None, left=None, heading=None, old=None, edit=None):
+        if lot is None:
+            lot = self.nb.lot(s['url'])
+            left = self.nb.time_remaining(s['listing_id'])
+            s['ends'] = time.time() + left
+            self.save()
+        mx = f'<b>{fmt(s["max"])}</b>'
+        if old is not None:
+            mx = f'<s>{fmt(old)}</s> → {mx}'
+        sid = s['id']
+        text = (f'{heading or f"🎯 <b>Snipe #{sid}</b>"}\n{link(s["url"], s["title"])}\n\n'
+                f'Your max: {mx}\n'
+                f'<i>Up to {esc(s.get("total") or "?")} with fees</i>\n\n'
+                f'{prices(lot)}\n'
+                f'Ends <b>{when(s["ends"])}</b>\n'
+                f'In {duration(left)} · bidding {LEAD}s before the end')
+        buttons = [
+            [button(f'{"−" if d < 0 else "+"}${abs(d)}', f'bump:{sid}:{d}') for d in (-5, -1, 1, 5)],
+            [button('🔄 Refresh', f'card:{sid}'), button('✕ Cancel', f'cancel:{sid}')],
+        ]
+        self.say(text, buttons, edit)
+
+    def show(self, edit=None):
+        refresh = [button('🔄 Refresh', 'list')]
+        if not self.snipes:
+            self.say('📋 <b>No snipes</b>\n\nSet one with <code>/snipe lot max</code>.', [refresh], edit)
+            return
+        now = time.time()
+        lines = ['📋 <b>Your snipes</b>']
+        buttons = []
+        for s in sorted(self.snipes, key=lambda s: s['ends']):
+            lines.append(f'\n<b>#{s["id"]}</b> · {link(s["url"], s["title"][:60])}')
+            if s['state'] == 'pending':
+                lines.append(f'Max <b>{fmt(s["max"])}</b> · ends in <b>{duration(s["ends"] - now)}</b>')
+                buttons.append([button(f'⚙️ Edit #{s["id"]}', f'open:{s["id"]}'),
+                                button(f'✕ Cancel #{s["id"]}', f'listcancel:{s["id"]}')])
+            else:
+                lines.append(f'Max <b>{fmt(s["max"])}</b> · ✅ bid placed, waiting for the end')
+        self.say('\n'.join(lines), buttons + [refresh], edit)
+
+    def cancel(self, ref, edit=None, quiet=False):
+        s = self.find(ref)
+        self.drop(s)
+        if not quiet:
+            self.say(f'🗑 <b>Snipe #{s["id"]} cancelled</b>\n{link(s["url"], s["title"])}\n\n'
+                     f'Max was {fmt(s["max"])}.', [], edit)
+
+    def info(self, ref, edit=None):
+        lot = self.nb.lot(ref)
+        left = self.nb.time_remaining(lot['listing_id'])
+        ends = f'Ends <b>{when(time.time() + left)}</b>\nIn {duration(left)}' if left > 0 else '<b>Ended</b>'
+        mine = next((s for s in self.snipes if s['listing_id'] == lot['listing_id']), None)
+        text = (f'ℹ️ {link(lot["url"], lot["title"])}\n\n'
+                f'Status: <b>{esc(lot["status"] or "unknown")}</b>\n'
+                f'{prices(lot)}\n'
+                f'{ends}')
+        if lot['my_max']:
+            text += f'\n\nYour max on the site: <b>{fmt(lot["my_max"])}</b>'
+        if mine:
+            text += f'\n\n🎯 Snipe #{mine["id"]} is set at <b>{fmt(mine["max"])}</b>'
+        self.say(text, [[button('🔄 Refresh', f'info:{lot["listing_id"]}')]], edit)
+
+
+def cmd_bot(args):
+    token = os.environ.get('TG_TOKEN')
+    chat = os.environ.get('TG_CHAT_ID')
+    user = os.environ.get('NB_USER')
+    password = os.environ.get('NB_PASS')
+    if not (token and chat and user and password):
+        raise SnipeError('Set TG_TOKEN, TG_CHAT_ID, NB_USER and NB_PASS in .env first.')
+    Bot(NativeBid(user, password), Telegram(token, chat)).run()
 
 
 def load_env(path=os.path.join(os.path.dirname(os.path.abspath(__file__)), '.env')):
@@ -486,6 +946,9 @@ def main():
     snipe.add_argument('max', type=float, help='Your maximum bid in dollars')
     snipe.add_argument('--now', action='store_true', help='Bid immediately instead of waiting (for testing)')
     snipe.set_defaults(fn=cmd_snipe)
+
+    bot = sub.add_parser('bot', help='Run the Telegram bot that takes /snipe commands from your phone')
+    bot.set_defaults(fn=cmd_bot)
 
     args = p.parse_args()
     try:
