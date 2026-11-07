@@ -1,0 +1,370 @@
+#include <cmath>
+#include <cstdio>
+#include <functional>
+#include <map>
+#include <string>
+#include <vector>
+
+#include "bot.h"
+#include "text.h"
+
+using namespace sniper;
+
+static int failures = 0;
+
+static void expect(bool ok, const std::string& what) {
+  std::printf("%s %s\n", ok ? "  ok  " : "  FAIL", what.c_str());
+  if (!ok) failures++;
+}
+
+struct Clock : Platform {
+  double t = 1000000;
+  std::string state;
+  bool quiet = true;
+  bool http(const HttpRequest&, const HeadFn&, const DataFn&, std::string& e) override {
+    e = "no network in sim";
+    return false;
+  }
+  double now() override { return t; }
+  void sleep(double s) override { t += s > 0 ? s : 0; }
+  void log(const std::string& line) override {
+    if (!quiet) std::printf("    [%7.1f] %s\n", t - 1000000, line.c_str());
+  }
+  bool load_state(std::string& out) override {
+    out = state;
+    return !state.empty();
+  }
+  bool save_state(const std::string& d) override {
+    state = d;
+    return true;
+  }
+};
+
+struct FakeLot {
+  std::string id;
+  double ends;
+  double minimum;
+  std::function<void(FakeLot&, double left)> on_check;
+  bool placed = false;
+  double placed_left = -1;
+};
+
+struct FakeNB : NativeBid {
+  Clock& c;
+  std::map<std::string, FakeLot> lots;
+  std::vector<std::string> events;
+  explicit FakeNB(Clock& c) : NativeBid(c, "u", "p"), c(c) {}
+  static std::string url(const std::string& key) {
+    return key == "X" ? "https://www.nativebid.com/Event/LotDetails/266333831/x" : "url" + key;
+  }
+  FakeLot* by_ref(const std::string& ref) {
+    for (auto& kv : lots) {
+      if (ref == kv.first || ref == kv.second.id || ref == url(kv.first)) return &kv.second;
+    }
+    return nullptr;
+  }
+  Result lot(const std::string& ref, Lot& out) override {
+    FakeLot* f = by_ref(ref);
+    if (!f) return Result::site("no lot " + ref);
+    std::string key;
+    for (auto& kv : lots) {
+      if (&kv.second == f) key = kv.first;
+    }
+    bool ended = c.t >= f->ends;
+    out = Lot();
+    out.url = url(key);
+    out.listing_id = f->id;
+    out.title = key == "X" ? "Rug <Blue> & Gold 5'x7\" (2-Piece)" : "Lot " + key;
+    out.price = f->minimum - 1;
+    out.minimum = ended ? NAN : f->minimum;
+    out.status = ended ? "Ended" : "Active";
+    out.bids = 3;
+    return {};
+  }
+  Result time_remaining(const std::string& id, double& left) override {
+    for (auto& kv : lots) {
+      if (kv.second.id == id) {
+        left = std::max(0.0, kv.second.ends - c.t);
+        if (kv.second.on_check) kv.second.on_check(kv.second, left);
+        left = std::max(0.0, kv.second.ends - c.t);
+        return {};
+      }
+    }
+    return Result::site("unknown id");
+  }
+  Result login() override {
+    events.push_back("login");
+    return {};
+  }
+  Result confirm(const Lot& lot, double amount, std::string& action, std::string& params, std::string& total) override {
+    (void)lot;
+    action = "/Listing/Action";
+    params = "x";
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "$%.2f", amount * 1.15 + 1);
+    total = buf;
+    return {};
+  }
+  Result place(const std::string&, const std::string&, bool& ok, std::string& message) override {
+    for (auto& kv : lots) {
+      double left = kv.second.ends - c.t;
+      if (!kv.second.placed && left > 0 && left < 62) {
+        kv.second.placed = true;
+        kv.second.placed_left = left;
+        events.push_back("placed " + kv.first);
+      }
+    }
+    ok = true;
+    message = "ActionSuccess";
+    return {};
+  }
+};
+
+struct Incoming {
+  double at;
+  long long chat;
+  std::string text;
+};
+
+struct FakeTG : Telegram {
+  Clock& c;
+  std::vector<Incoming> inbox;
+  std::vector<std::pair<double, std::string>> sent;
+  std::vector<std::pair<double, int>> polls;
+  std::map<long long, std::pair<std::string, Keyboard>> messages;
+  std::vector<std::string> answers;
+  long long next_id = 1;
+  long long update = 100;
+  explicit FakeTG(Clock& c) : Telegram(c, "token", 42), c(c) {}
+  Result send(const std::string& text, const Keyboard& kb, long long edit) override {
+    if (!edit) edit = next_id++;
+    messages[edit] = {text, kb};
+    sent.push_back({c.t - 1000000, text});
+    return {};
+  }
+  Result send_plain(const std::string& text) override {
+    sent.push_back({c.t - 1000000, text});
+    return {};
+  }
+  Result answer(const std::string&, const std::string& text, bool alert) override {
+    answers.push_back(text + (alert ? " (alert)" : ""));
+    return {};
+  }
+  Result updates(long long, int wait, JsonDocument& reply) override {
+    reply.clear();
+    JsonArray result = reply["result"].to<JsonArray>();
+    for (size_t i = 0; i < inbox.size(); i++) {
+      if (inbox[i].at <= c.t - 1000000) {
+        JsonObject u = result.add<JsonObject>();
+        u["update_id"] = update++;
+        u["message"]["chat"]["id"] = inbox[i].chat;
+        u["message"]["text"] = inbox[i].text;
+        inbox.erase(inbox.begin() + i);
+        return {};
+      }
+    }
+    polls.push_back({c.t - 1000000, wait});
+    double next = c.t + wait;
+    for (const auto& m : inbox) next = std::min(next, m.at + 1000000);
+    c.t = std::max(c.t, next);
+    return {};
+  }
+};
+
+static void run_until(Bot& bot, Clock& c, double until) {
+  while (c.t - 1000000 < until) {
+    Result r = bot.tick();
+    if (!r.ok()) {
+      std::printf("    tick error: %s\n", r.msg.c_str());
+      c.sleep(5);
+    }
+  }
+}
+
+static bool sent_with(const FakeTG& tg, const std::string& needle, double* when = nullptr) {
+  for (const auto& s : tg.sent) {
+    if (contains(s.second, needle)) {
+      if (when) *when = s.first;
+      return true;
+    }
+  }
+  return false;
+}
+
+static void timing() {
+  std::printf("\nscenario: two snipes, commands, a late extension after bidding\n");
+  Clock c;
+  FakeNB nb(c);
+  FakeTG tg(c);
+  nb.lots["A"] = {"101", c.t + 300, 8.0, nullptr};
+  bool extended = false;
+  nb.lots["B"] = {"202", c.t + 320, 5.0, [&](FakeLot& l, double left) {
+                    if (l.placed && left < 50 && !extended) {
+                      l.ends += 120;
+                      extended = true;
+                    }
+                  }};
+  nb.lots["C"] = {"303", c.t + 2000, 1.0, nullptr};
+  tg.inbox = {{5, 42, "/start"},        {6, 42, "/snipe A 10"},   {7, 42, "/snipe B 4"},
+              {8, 42, "/s B 9"},        {9, 42, "/snipe A 11"},   {10, 999, "/snipe C 50"},
+              {11, 42, "/snipe C 50"},  {12, 42, "/l"},           {13, 42, "/cancel 9"},
+              {14, 42, "/c #3"},        {15, 42, "/info A"},      {16, 42, "hello"}};
+  Bot bot(c, nb, tg);
+  bot.start();
+  run_until(bot, c, 700);
+  for (const auto& s : tg.sent) {
+    std::string line = plain(s.second);
+    for (auto& ch : line) {
+      if (ch == '\n') ch = '|';
+    }
+    std::printf("    [%5.0fs] %s\n", s.first, prefix(line, 110).c_str());
+  }
+  expect(nb.lots["A"].placed && std::fabs(nb.lots["A"].placed_left - 60) < 0.01, "A bid placed exactly 60s before the end");
+  expect(nb.lots["B"].placed && std::fabs(nb.lots["B"].placed_left - 60) < 0.01, "B bid placed exactly 60s before the end");
+  expect(!nb.lots["C"].placed, "cancelled snipe C never bid");
+  expect(!sent_with(tg, "Snipe #4"), "message from another chat ignored");
+  expect(sent_with(tg, "<s>$10.00</s> → <b>$11.00</b>"), "/snipe on the same lot updates the max");
+  expect(sent_with(tg, "below the next bid $5.00"), "max below next bid rejected");
+  double ended_b = 0;
+  expect(sent_with(tg, "Lot ended</b> · #2", &ended_b) && ended_b > 440, "B's ended message waits for the extension");
+  bool overlap = false;
+  for (const auto& p : tg.polls) {
+    for (double fire : {300.0 - LEAD, 320.0 - LEAD}) {
+      if (p.first < fire && p.first + p.second > fire - BID_WINDOW) overlap = true;
+    }
+  }
+  expect(!overlap, "no Telegram poll runs into a bid window");
+}
+
+static void extension_and_restart() {
+  std::printf("\nscenario: extension during bid mode, lot ending in 40s, restart mid-wait\n");
+  Clock c;
+  FakeNB nb(c);
+  nb.lots["D"] = {"1", c.t + 300, 2.0, [&](FakeLot& l, double left) {
+                    static bool done = false;
+                    if (!done && left < 70) {
+                      l.ends += 200;
+                      done = true;
+                    }
+                  }};
+  nb.lots["E"] = {"2", c.t + 40, 2.0, nullptr};
+  {
+    FakeTG tg(c);
+    tg.inbox = {{1, 42, "/snipe D 5"}, {2, 42, "/snipe E 5"}};
+    Bot bot(c, nb, tg);
+    bot.start();
+    run_until(bot, c, 150);
+    expect(nb.lots["E"].placed, "lot ending in 40s bids right away");
+    expect(sent_with(tg, "Lot ended</b> · #2"), "E's ended message sent");
+  }
+  FakeTG tg(c);
+  Bot bot(c, nb, tg);
+  bot.start();
+  bot.flush();
+  expect(sent_with(tg, "1 snipe pending"), "restart reloads the pending snipe");
+  run_until(bot, c, 800);
+  expect(nb.lots["D"].placed && std::fabs(nb.lots["D"].placed_left - 60) < 0.01,
+         "after the extension, D bids 60s before the new end");
+  expect(sent_with(tg, "Lot ended</b> · #1"), "D's ended message sent");
+}
+
+struct TagCheck {
+  bool ok = true;
+  std::vector<std::string> stack;
+};
+
+static bool valid_html(const std::string& s) {
+  static const std::vector<std::string> allowed = {"b", "i", "s", "u", "a", "code", "pre", "blockquote"};
+  std::vector<std::string> stack;
+  for (size_t i = 0; i < s.size(); i++) {
+    if (s[i] != '<') continue;
+    size_t close = s.find('>', i);
+    if (close == std::string::npos) return false;
+    std::string tag = s.substr(i + 1, close - i - 1);
+    bool end = !tag.empty() && tag[0] == '/';
+    std::string name = tag.substr(end ? 1 : 0, tag.find(' ') == std::string::npos ? std::string::npos : tag.find(' ') - (end ? 1 : 0));
+    if (std::find(allowed.begin(), allowed.end(), name) == allowed.end()) return false;
+    if (end) {
+      if (stack.empty() || stack.back() != name) return false;
+      stack.pop_back();
+    } else {
+      stack.push_back(name);
+    }
+    i = close;
+  }
+  return stack.empty();
+}
+
+static void buttons_and_html() {
+  std::printf("\nscenario: buttons, HTML and command parsing\n");
+  Clock c;
+  FakeNB nb(c);
+  FakeTG tg(c);
+  nb.lots["X"] = {"266333832", c.t + 200000, 8.0, nullptr};
+  Bot bot(c, nb, tg);
+  auto msg = [&](const std::string& t) {
+    bot.handle(t);
+    bot.flush();
+  };
+  auto press = [&](long long id, const std::string& label) {
+    for (const auto& row : tg.messages[id].second.rows) {
+      for (const auto& b : row) {
+        if (b.first == label) {
+          bot.press("q", b.second, id);
+          bot.flush();
+          return;
+        }
+      }
+    }
+    expect(false, "button " + label + " exists on message " + std::to_string(id));
+  };
+  msg("/help");
+  msg("/snipe X 10");
+  long long card = tg.next_id - 1;
+  press(card, "+$5");
+  expect(contains(tg.messages[card].first, "<s>$10.00</s> → <b>$15.00</b>"), "+$5 edits the card in place");
+  expect(tg.answers.back() == "Max is now $15.00", "+$5 pops up the new max");
+  press(card, "−$5");
+  press(card, "−$5");
+  expect(tg.answers.back() == "Your max $5.00 is below the next bid $8.00. (alert)", "going below the next bid alerts");
+  msg("/info X");
+  expect(contains(tg.messages[tg.next_id - 1].first, "Snipe #1 is set at <b>$10.00</b>"), "/info shows the snipe");
+  msg("/list");
+  long long list = tg.next_id - 1;
+  press(list, "⚙️ Edit #1");
+  expect(tg.next_id - 1 == list + 1, "Edit opens a new card");
+  press(list, "✕ Cancel #1");
+  expect(contains(tg.messages[list].first, "No snipes"), "Cancel from the list re-renders it");
+  press(card, "+$1");
+  expect(contains(tg.answers.back(), "no snipe matching 1"), "stale card button explains the snipe is gone");
+  msg("/snipe X 10");
+  msg("/cancel https://www.nativebid.com/Event/LotDetails/266333831/x");
+  expect(contains(tg.sent.back().second, "cancelled"), "/cancel by URL");
+  msg("/snipe 1 10 -now");
+  expect(contains(plain(tg.sent.back().second), "I didn’t understand \"-now\""), "extra words explained");
+  msg("/s 1 ten");
+  expect(contains(plain(tg.sent.back().second), "\"ten\" isn’t a dollar amount"), "bad amount explained");
+  msg("/bogus");
+  expect(contains(plain(tg.sent.back().second), "I don’t know /bogus"), "unknown command explained");
+  bool html_ok = true, data_ok = true;
+  for (const auto& s : tg.sent) html_ok = html_ok && valid_html(s.second);
+  for (const auto& m : tg.messages) {
+    html_ok = html_ok && valid_html(m.second.first);
+    for (const auto& row : m.second.second.rows) {
+      for (const auto& b : row) data_ok = data_ok && b.second.size() <= 64;
+    }
+  }
+  expect(html_ok, "every message is valid Telegram HTML (title has < > & \" ')");
+  expect(data_ok, "every button's data fits Telegram's 64-byte limit");
+  std::printf("    sample card:\n");
+  std::string sample = plain(tg.messages[card].first);
+  std::printf("      %s\n", sample.c_str());
+}
+
+int main() {
+  timing();
+  extension_and_restart();
+  buttons_and_html();
+  std::printf("\n%s\n", failures ? "SOME CHECKS FAILED" : "all checks passed");
+  return failures ? 1 : 0;
+}

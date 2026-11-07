@@ -3,3 +3,7 @@ __pycache__/
 .env
 snipes.json
 snipes.json.tmp
+firmware/host/sniper
+firmware/host/sim
+firmware/third_party/
+firmware/compile_flags.txt
