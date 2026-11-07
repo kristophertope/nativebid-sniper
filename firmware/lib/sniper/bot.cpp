@@ -332,7 +332,7 @@ Result Bot::bid_mode(long id) {
 
 Result Bot::poll(int wait) {
   JsonDocument doc;
-  Result r = tg_.updates(offset_, wait, doc);
+  Result r = tg_.updates(offset_, wait, 1, doc);
   if (!r.ok()) return r;
   for (JsonObject u : doc["result"].as<JsonArray>()) {
     offset_ = u["update_id"].as<long long>() + 1;

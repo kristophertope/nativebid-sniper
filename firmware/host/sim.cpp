@@ -66,7 +66,9 @@ struct FakeNB : NativeBid {
     }
     return nullptr;
   }
+  double slow_until = 0;
   Result lot(const std::string& ref, Lot& out) override {
+    if (c.t - 1000000 < slow_until && ref.rfind("url", 0) != 0) c.sleep(8);
     FakeLot* f = by_ref(ref);
     if (!f) return Result::site("no lot " + ref);
     std::string key;
@@ -161,19 +163,23 @@ struct FakeTG : Telegram {
     answers.push_back(text + (alert ? " (alert)" : ""));
     return {};
   }
-  Result updates(long long, int wait, JsonDocument& reply) override {
+  int max_batch = 0;
+  Result updates(long long, int wait, int limit, JsonDocument& reply) override {
     reply.clear();
     JsonArray result = reply["result"].to<JsonArray>();
-    for (size_t i = 0; i < inbox.size(); i++) {
+    for (size_t i = 0; i < inbox.size() && (int)result.size() < limit;) {
       if (inbox[i].at <= c.t - 1000000) {
         JsonObject u = result.add<JsonObject>();
         u["update_id"] = update++;
         u["message"]["chat"]["id"] = inbox[i].chat;
         u["message"]["text"] = inbox[i].text;
         inbox.erase(inbox.begin() + i);
-        return {};
+      } else {
+        i++;
       }
     }
+    max_batch = std::max(max_batch, (int)result.size());
+    if (result.size()) return {};
     polls.push_back({c.t - 1000000, wait});
     double next = c.t + wait;
     for (const auto& m : inbox) next = std::min(next, m.at + 1000000);
@@ -423,7 +429,26 @@ static void failing_bid() {
   expect(bot.snipes.empty(), "the failed snipe is removed");
 }
 
+static void command_burst() {
+  std::printf("\nscenario: five slow commands arrive just before a bid window\n");
+  Clock c;
+  FakeNB nb(c);
+  FakeTG tg(c);
+  nb.lots["J"] = {"1", c.t + 300, 2.0, nullptr};
+  tg.inbox = {{1, 42, "/snipe J 5"}};
+  for (int i = 0; i < 5; i++) tg.inbox.push_back({220, 42, "/info J"});
+  Bot bot(c, nb, tg);
+  bot.start();
+  run_until(bot, c, 10);
+  nb.slow_until = 300;
+  run_until(bot, c, 400);
+  expect(tg.max_batch == 1, "reads one Telegram update at a time");
+  expect(nb.lots["J"].placed && std::fabs(nb.lots["J"].placed_left - 60) < 0.01,
+         "bid still lands 60s before the end despite 8s-per-request commands");
+}
+
 int main() {
+  command_burst();
   failing_bid();
   broken_snipe();
   timing();

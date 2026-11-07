@@ -42,7 +42,7 @@ class Telegram {
   virtual Result send(const std::string& text, const Keyboard& kb, long long edit = 0);
   virtual Result send_plain(const std::string& text);
   virtual Result answer(const std::string& query_id, const std::string& text = "", bool alert = false);
-  virtual Result updates(long long offset, int wait, JsonDocument& reply);
+  virtual Result updates(long long offset, int wait, int limit, JsonDocument& reply);
 
  protected:
   Platform& p_;

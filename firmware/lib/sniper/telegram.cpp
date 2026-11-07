@@ -61,10 +61,10 @@ Result Telegram::answer(const std::string& query_id, const std::string& text, bo
   return call("answerCallbackQuery", params, reply);
 }
 
-Result Telegram::updates(long long offset, int wait, JsonDocument& reply) {
+Result Telegram::updates(long long offset, int wait, int limit, JsonDocument& reply) {
   JsonDocument params;
   params["timeout"] = wait;
-  params["limit"] = 5;
+  params["limit"] = limit;
   JsonArray allowed = params["allowed_updates"].to<JsonArray>();
   allowed.add("message");
   allowed.add("callback_query");
