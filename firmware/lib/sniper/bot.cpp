@@ -41,6 +41,17 @@ static std::string digits_after(const std::string& s, size_t start) {
 
 static std::string esc(const std::string& s) { return html_escape(s); }
 
+static std::vector<std::string> numbers(const std::string& s) {
+  std::vector<std::string> out;
+  for (size_t i = 0; i < s.size();) {
+    size_t j = i;
+    while (j < s.size() && std::isdigit((unsigned char)s[j])) j++;
+    if (j - i >= 5) out.push_back(s.substr(i, j - i));
+    i = j > i ? j : i + 1;
+  }
+  return out;
+}
+
 static std::string link(const std::string& url, const std::string& title) {
   std::string t = prefix(title, 100);
   return "<a href=\"" + html_escape(url, true) + "\">" + esc(t.empty() ? "Lot" : t) + "</a>";
@@ -451,6 +462,13 @@ void Bot::handle(const std::string& text, const std::string& reply_to) {
   }
   size_t count = usage->second.first;
   const std::string& form = usage->second.second;
+  if (cmd == "/snipe" && args.size() == 1) {
+    std::vector<std::string> found = numbers(args[0]);
+    std::string lot = found.empty() ? "266333831" : found[0];
+    say("❌ Missing your max. Put it after the lot, e.g.\n<code>/s " + esc(lot) + " 10" + (now ? " -now" : "") +
+        "</code>");
+    return;
+  }
   if (args.size() != count) {
     std::string extra;
     if (args.size() > count) {
@@ -546,16 +564,6 @@ Result Bot::find(const std::string& raw, long& id) {
   return {};
 }
 
-static std::vector<std::string> numbers(const std::string& s) {
-  std::vector<std::string> out;
-  for (size_t i = 0; i < s.size();) {
-    size_t j = i;
-    while (j < s.size() && std::isdigit((unsigned char)s[j])) j++;
-    if (j - i >= 5) out.push_back(s.substr(i, j - i));
-    i = j > i ? j : i + 1;
-  }
-  return out;
-}
 
 Result Bot::by_lot(const std::string& ref, long& id) {
   std::vector<std::string> wanted = numbers(ref);

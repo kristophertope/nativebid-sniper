@@ -405,6 +405,9 @@ static void buttons_and_html() {
   msg("/snipe X 10");
   msg("/cancel https://www.nativebid.com/Event/LotDetails/266333831/x");
   expect(contains(tg.sent.back().second, "cancelled"), "/cancel by URL");
+  msg("/s https://www.nativebid.com/Event/LotDetails/266818742/Lamp -now");
+  expect(contains(plain(tg.sent.back().second), "Missing your max. Put it after the lot, e.g.\n/s 266818742 10 -now"),
+         "a missing max is explained with the lot number");
   msg("/snipe 1 10 later");
   expect(contains(plain(tg.sent.back().second), "I didn’t understand \"later\""), "extra words explained");
   msg("/s 1 ten");
