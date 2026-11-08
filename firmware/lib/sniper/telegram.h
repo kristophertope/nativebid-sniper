@@ -38,6 +38,7 @@ class Telegram {
       : p_(p), web_(p, false), url_("https://api.telegram.org/bot" + token + "/"), chat_id_(chat_id) {}
   virtual ~Telegram() = default;
   long long chat_id() const { return chat_id_; }
+  void release() { p_.release("api.telegram.org"); }
   virtual Result call(const char* method, const JsonDocument& params, JsonDocument& reply, int wait = 15);
   virtual Result send(const std::string& text, const Keyboard& kb, long long edit = 0);
   virtual Result send_plain(const std::string& text);

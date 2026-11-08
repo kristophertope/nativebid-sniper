@@ -1,6 +1,7 @@
 #include <cmath>
 #include <cstdio>
 #include <functional>
+#include <algorithm>
 #include <map>
 #include <set>
 #include <string>
@@ -36,6 +37,8 @@ struct Clock : Platform {
     return !state.empty();
   }
   int saves = 0;
+  std::vector<std::string> released;
+  void release(const std::string& host) override { released.push_back(host); }
   bool save_state(const std::string& d) override {
     saves++;
     state = d;
@@ -254,6 +257,8 @@ static void timing() {
     }
   }
   expect(!overlap, "no Telegram poll runs into a bid window");
+  expect(std::count(c.released.begin(), c.released.end(), "api.telegram.org") >= 2,
+         "bid mode closes the Telegram connection");
   std::printf("    %d state writes over 700s\n", c.saves);
 }
 

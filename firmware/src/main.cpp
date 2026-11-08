@@ -83,6 +83,8 @@ static bool sync_clock() {
 
 void setup() {
   Serial.begin(115200);
+  pinMode(ACTIVITY_LED, OUTPUT);
+  digitalWrite(ACTIVITY_LED, LOW);
   delay(300);
   Serial.println("\nNativeBid sniper starting");
   if (!load_settings()) {
@@ -98,7 +100,7 @@ void setup() {
 
 void loop() {
   if (!connect_wifi()) {
-    platform.drop_connection();
+    platform.release_all();
     delay(5000);
     return;
   }

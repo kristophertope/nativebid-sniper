@@ -24,6 +24,7 @@ class Reader {
   Reader(WiFiClientSecure& c, uint32_t deadline) : c_(c), deadline_(deadline) {}
 
   size_t received() const { return received_; }
+  void extend(uint32_t deadline) { deadline_ = deadline; }
 
   bool line(std::string& out) {
     out.clear();
@@ -90,10 +91,60 @@ bool split_url(const std::string& url, std::string& host, std::string& path) {
 
 }
 
-void EspPlatform::drop_connection() {
-  if (client_) client_->stop();
-  client_.reset();
-  host_.clear();
+constexpr size_t MAX_CONNECTIONS = 2;
+constexpr size_t MAX_SKIP = 300 * 1024;
+constexpr uint32_t SKIP_MS = 4000;
+
+void EspPlatform::release(const std::string& host) {
+  for (size_t i = 0; i < connections_.size(); i++) {
+    if (connections_[i].host == host) {
+      connections_[i].client->stop();
+      connections_.erase(connections_.begin() + i);
+      return;
+    }
+  }
+}
+
+void EspPlatform::release_all() {
+  for (auto& c : connections_) c.client->stop();
+  connections_.clear();
+}
+
+EspPlatform::Connection* EspPlatform::open(const std::string& host, bool& reused, std::string& error) {
+  for (auto& c : connections_) {
+    if (c.host == host && c.client->connected()) {
+      reused = true;
+      c.used = millis();
+      return &c;
+    }
+  }
+  release(host);
+  if (connections_.size() >= MAX_CONNECTIONS) {
+    size_t oldest = 0;
+    for (size_t i = 1; i < connections_.size(); i++) {
+      if ((int32_t)(connections_[i].used - connections_[oldest].used) < 0) oldest = i;
+    }
+    release(connections_[oldest].host);
+  }
+  Connection c;
+  c.host = host;
+  c.client.reset(new WiFiClientSecure());
+  c.client->setCACertBundle(crt_bundle_start);
+  c.client->setHandshakeTimeout(15);
+  uint32_t started = millis();
+  if (!c.client->connect(host.c_str(), 443)) {
+    char msg[96];
+    c.client->lastError(msg, sizeof msg);
+    error = "couldn't connect to " + host + " (" + msg + ")";
+    return nullptr;
+  }
+  char took[96];
+  snprintf(took, sizeof took, "Connected to %s in %.1fs", host.c_str(), (millis() - started) / 1000.0);
+  log(took);
+  c.used = millis();
+  connections_.push_back(std::move(c));
+  reused = false;
+  return &connections_.back();
 }
 
 bool EspPlatform::http(const HttpRequest& req, const HeadFn& on_head, const DataFn& on_data, std::string& error) {
@@ -102,39 +153,33 @@ bool EspPlatform::http(const HttpRequest& req, const HeadFn& on_head, const Data
     error = "only https URLs are supported";
     return false;
   }
-  for (int attempt = 0; attempt < 2; attempt++) {
+  bool lit = contains(host, "nativebid.com");
+  if (lit) digitalWrite(ACTIVITY_LED, HIGH);
+  bool ok = false;
+  for (int attempt = 0; attempt < 2 && !ok; attempt++) {
     bool retry = false;
-    if (exchange(req, host, path, on_head, on_data, error, retry)) return true;
-    drop_connection();
-    if (!retry) return false;
+    ok = exchange(req, host, path, on_head, on_data, error, retry);
+    if (!ok) release(host);
+    if (!ok && !retry) break;
   }
-  return false;
+  if (lit) digitalWrite(ACTIVITY_LED, LOW);
+  return ok;
 }
 
 bool EspPlatform::exchange(const HttpRequest& req, const std::string& host, const std::string& path,
                            const HeadFn& on_head, const DataFn& on_data, std::string& error, bool& retry) {
-  bool reused = client_ && host_ == host && client_->connected();
-  if (!reused) {
-    drop_connection();
-    client_.reset(new WiFiClientSecure());
-    client_->setCACertBundle(crt_bundle_start);
-    client_->setHandshakeTimeout(15);
-    if (!client_->connect(host.c_str(), 443)) {
-      char msg[96];
-      client_->lastError(msg, sizeof msg);
-      error = "couldn't connect to " + host + " (" + msg + ")";
-      return false;
-    }
-    host_ = host;
-  }
+  bool reused = false;
+  Connection* conn = open(host, reused, error);
+  if (!conn) return false;
+  WiFiClientSecure& client = *conn->client;
 
   std::string head = req.method + " " + path + " HTTP/1.1\r\nHost: " + host + "\r\nConnection: keep-alive\r\n";
   for (const auto& h : req.headers) head += h.name + ": " + h.value + "\r\n";
   if (req.method != "GET" || !req.body.empty()) head += "Content-Length: " + std::to_string(req.body.size()) + "\r\n";
   head += "\r\n";
-  bool sent = client_->write((const uint8_t*)head.data(), head.size()) == head.size();
+  bool sent = client.write((const uint8_t*)head.data(), head.size()) == head.size();
   if (sent && !req.body.empty()) {
-    sent = client_->write((const uint8_t*)req.body.data(), req.body.size()) == req.body.size();
+    sent = client.write((const uint8_t*)req.body.data(), req.body.size()) == req.body.size();
   }
   if (!sent) {
     retry = reused;
@@ -142,7 +187,7 @@ bool EspPlatform::exchange(const HttpRequest& req, const std::string& host, cons
     return false;
   }
 
-  Reader in(*client_, millis() + (uint32_t)req.timeout_s * 1000);
+  Reader in(client, millis() + (uint32_t)req.timeout_s * 1000);
   std::string line;
   if (!in.line(line) || !starts_with(line, "HTTP/")) {
     retry = reused && in.received() == 0;
@@ -171,18 +216,29 @@ bool EspPlatform::exchange(const HttpRequest& req, const std::string& host, cons
   }
 
   if (on_head && !on_head(result)) {
-    drop_connection();
+    release(host);
     return true;
   }
 
   char buf[CHUNK];
+  bool skipping = false;
+  size_t skipped = 0;
+  uint32_t skip_started = 0;
   auto pump = [&](long count, bool until_close) {
     while (until_close || count > 0) {
       size_t want = until_close || count > (long)sizeof buf ? sizeof buf : (size_t)count;
       size_t got = in.read(buf, want);
       if (!got) return until_close ? 1 : 0;
       if (!until_close) count -= got;
-      if (on_data && !on_data(buf, got)) return 2;
+      if (skipping) {
+        skipped += got;
+        if (skipped > MAX_SKIP) return 2;
+      } else if (on_data && !on_data(buf, got)) {
+        if (until_close) return 2;
+        skipping = true;
+        skip_started = millis();
+        in.extend(skip_started + SKIP_MS);
+      }
     }
     return 1;
   };
@@ -211,11 +267,23 @@ bool EspPlatform::exchange(const HttpRequest& req, const std::string& host, cons
     closing = true;
   }
 
+  if (outcome == 0 && skipping) outcome = 2;
   if (outcome == 0) {
     error = "response cut off";
     return false;
   }
-  if (outcome == 2 || closing) drop_connection();
+  if (skipping && outcome == 1) {
+    char took[96];
+    snprintf(took, sizeof took, "Skipped %u bytes in %.2fs to keep the connection", (unsigned)skipped,
+             (millis() - skip_started) / 1000.0);
+    log(took);
+  }
+  if (outcome == 2 || closing) release(host);
+  if (outcome == 1 && !closing) {
+    for (auto& c : connections_) {
+      if (c.host == host) c.used = millis();
+    }
+  }
   return true;
 }
 

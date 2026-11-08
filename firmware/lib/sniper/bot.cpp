@@ -297,6 +297,7 @@ Result Bot::refresh() {
 
 Result Bot::bid_mode(long id) {
   Snipe snap = *get(id);
+  tg_.release();
   p_.log("Bid mode for #" + std::to_string(id) + "; Telegram paused");
   Wait w;
   Result r = wait_for(p_, nb_, snap.listing_id, LEAD, BID_WINDOW * 2, w);

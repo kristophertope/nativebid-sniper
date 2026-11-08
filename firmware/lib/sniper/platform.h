@@ -36,6 +36,7 @@ class Platform {
   virtual void log(const std::string& line) = 0;
   virtual bool load_state(std::string& out) = 0;
   virtual bool save_state(const std::string& data) = 0;
+  virtual void release(const std::string& host) { (void)host; }
 };
 
 enum class Err { None, Network, Site, NotSignedIn };
