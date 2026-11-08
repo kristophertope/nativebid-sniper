@@ -7,3 +7,7 @@ firmware/host/sniper
 firmware/host/sim
 firmware/third_party/
 firmware/compile_flags.txt
+firmware/.pio/
+firmware/backup/
+firmware/tools/.venv/
+firmware/data/
