@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <Preferences.h>
+#include <esp_task_wdt.h>
 #include <sys/time.h>
 
 #include <cstdlib>
@@ -68,6 +69,7 @@ class Reader {
       } else {
         delay(2);
       }
+      esp_task_wdt_reset();
     }
     return false;
   }
@@ -294,12 +296,20 @@ double EspPlatform::now() {
 }
 
 void EspPlatform::sleep(double seconds) {
-  if (seconds > 0) delay((uint32_t)(seconds * 1000));
+  if (seconds <= 0) return;
+  uint32_t left = (uint32_t)(seconds * 1000);
+  while (left) {
+    uint32_t step = left < 1000 ? left : 1000;
+    esp_task_wdt_reset();
+    delay(step);
+    left -= step;
+  }
+  esp_task_wdt_reset();
 }
 
 void EspPlatform::log(const std::string& line) {
-  Serial.printf("%s %s  [heap %u, min %u]\n", clock_time(now()).c_str(), line.c_str(), ESP.getFreeHeap(),
-                ESP.getMinFreeHeap());
+  Serial.printf("%s %s  [heap %u, min %u, block %u]\n", clock_time(now()).c_str(), line.c_str(), ESP.getFreeHeap(),
+                ESP.getMinFreeHeap(), ESP.getMaxAllocHeap());
 }
 
 bool EspPlatform::load_state(std::string& out) {
