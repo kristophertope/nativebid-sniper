@@ -13,6 +13,7 @@ namespace sniper {
 
 constexpr double LEAD = 60;
 constexpr double BID_WINDOW = 15;
+constexpr double GIVE_UP_AFTER = 24 * 3600;
 
 struct Snipe {
   long id = 0;
@@ -24,6 +25,7 @@ struct Snipe {
   double max = 0;
   double ends = 0;
   double check_at = 0;
+  bool now = false;
 };
 
 class Bot {
@@ -60,7 +62,7 @@ class Bot {
   Result find(const std::string& ref, long& id);
   Result by_lot(const std::string& ref, long& id);
   Result confirm(const Lot& lot, double amount, std::string& total);
-  Result add(const std::string& ref, double max_bid, long long edit = 0);
+  Result add(const std::string& ref, double max_bid, long long edit = 0, bool now = false);
   Result card(long id, const Lot* lot = nullptr, double left = 0, const std::string& heading = "", double old = NAN,
               long long edit = 0);
   Result show(long long edit = 0);
@@ -72,6 +74,7 @@ class Bot {
   Telegram& tg_;
   std::deque<Outgoing> outbox_;
   std::map<long, int> failures_;
+  std::map<long, double> failing_since_;
   long long offset_ = -1;
   long next_id_ = 1;
   std::string saved_;

@@ -13,6 +13,7 @@ namespace sniper {
 static const char* HELP =
     "<b>Commands</b>\n"
     "/snipe or /s <i>lot max</i> – set or change a snipe\n"
+    "   add <code>-now</code> to bid right away\n"
     "/list or /l – your snipes\n"
     "/cancel or /c <i># or lot</i> – cancel a snipe\n"
     "/info or /i <i>lot</i> – price and time left\n\n"
@@ -100,6 +101,7 @@ void Bot::load() {
     s.max = o["max"] | 0.0;
     s.ends = o["ends"] | 0.0;
     s.check_at = o["check_at"] | 0.0;
+    s.now = o["now"] | false;
     snipes.push_back(s);
   }
 }
@@ -128,6 +130,7 @@ void Bot::save() {
     o["state"] = s.state;
     o["ends"] = s.ends;
     o["check_at"] = s.check_at;
+    if (s.now) o["now"] = true;
   }
   std::string out;
   serializeJson(doc, out);
@@ -148,6 +151,7 @@ Snipe* Bot::get(long id) {
 
 void Bot::drop(long id) {
   snipes.erase(std::remove_if(snipes.begin(), snipes.end(), [&](const Snipe& s) { return s.id == id; }), snipes.end());
+  failing_since_.erase(id);
   save();
 }
 
@@ -212,7 +216,12 @@ Result Bot::tick() {
   double now = p_.now();
   const Snipe* due = nullptr;
   for (const auto& s : snipes) {
-    if (s.state == "pending" && now >= s.ends - LEAD - BID_WINDOW && (!due || s.ends < due->ends)) due = &s;
+    if (s.state != "pending") continue;
+    if (s.now) {
+      due = &s;
+      break;
+    }
+    if (now >= s.ends - LEAD - BID_WINDOW && (!due || s.ends < due->ends)) due = &s;
   }
   if (due) return bid_mode(due->id);
   r = flush();
@@ -246,9 +255,18 @@ void Bot::missed(long id) {
 }
 
 void Bot::retry_later(long id, const Result& r) {
-  p_.log("Couldn’t check #" + std::to_string(id) + " (" + r.msg + "); trying again in 30s");
   Snipe* s = get(id);
-  if (s) s->check_at = p_.now() + 30;
+  if (!s) return;
+  double now = p_.now();
+  auto since = failing_since_.emplace(id, now).first->second;
+  if (now - since >= GIVE_UP_AFTER) {
+    say("⚠️ <b>Gave up on snipe #" + std::to_string(id) + "</b>\n" + link(s->url, s->title) +
+        "\n\nNativeBid hasn’t answered about this lot for a day (" + esc(r.msg) + "), so I stopped tracking it.");
+    drop(id);
+    return;
+  }
+  p_.log("Couldn’t check #" + std::to_string(id) + " (" + r.msg + "); trying again in 30s");
+  s->check_at = now + 30;
 }
 
 Result Bot::refresh() {
@@ -263,6 +281,7 @@ Result Bot::refresh() {
       retry_later(id, r);
       continue;
     }
+    failing_since_.erase(id);
     double now = p_.now();
     s = get(id);
     if (s->state == "pending") {
@@ -299,8 +318,9 @@ Result Bot::bid_mode(long id) {
   Snipe snap = *get(id);
   tg_.release();
   p_.log("Bid mode for #" + std::to_string(id) + "; Telegram paused");
-  Wait w;
-  Result r = wait_for(p_, nb_, snap.listing_id, LEAD, BID_WINDOW * 2, w);
+  Wait w = Wait::Fire;
+  Result r;
+  if (!snap.now) r = wait_for(p_, nb_, snap.listing_id, LEAD, BID_WINDOW * 2, w);
   if (!r.ok()) return r;
   if (w == Wait::Later) {
     p_.log("#" + std::to_string(id) + " was extended; leaving bid mode");
@@ -410,7 +430,16 @@ void Bot::handle(const std::string& text, const std::string& reply_to) {
   std::string cmd = parts.empty() ? "" : lower(parts[0].substr(0, parts[0].find('@')));
   auto alias = ALIASES.find(cmd);
   if (alias != ALIASES.end()) cmd = alias->second;
-  std::vector<std::string> args(parts.begin() + (parts.empty() ? 0 : 1), parts.end());
+  std::vector<std::string> args;
+  bool now = false;
+  for (size_t i = 1; i < parts.size(); i++) {
+    std::string a = lower(parts[i]);
+    if (a == "-now" || a == "--now" || a == "\xE2\x80\x94now" || a == "\xE2\x80\x93now") {
+      now = true;
+    } else {
+      args.push_back(parts[i]);
+    }
+  }
   if (cmd == "/start" || cmd == "/help" || cmd.empty() || cmd[0] != '/') {
     say(HELP);
     return;
@@ -438,7 +467,7 @@ void Bot::handle(const std::string& text, const std::string& reply_to) {
       report(Result::site("\"" + args[1] + "\" isn’t a dollar amount. Usage: " + form));
       return;
     }
-    report(add(args[0], max_bid));
+    report(add(args[0], max_bid, 0, now));
   } else if (cmd == "/list") {
     report(show());
   } else if (cmd == "/cancel") {
@@ -560,7 +589,7 @@ Result Bot::confirm(const Lot& lot, double amount, std::string& total) {
   return nb_.confirm(lot, amount, action, params, total);
 }
 
-Result Bot::add(const std::string& ref, double max_bid, long long edit) {
+Result Bot::add(const std::string& ref, double max_bid, long long edit, bool now_flag) {
   if (std::isnan(max_bid) || max_bid <= 0) return Result::site("Usage: " + USAGE.at("/snipe").second);
   max_bid = cents(max_bid);
   Lot lot;
@@ -581,7 +610,7 @@ Result Bot::add(const std::string& ref, double max_bid, long long edit) {
     return Result::site("Snipe #" + std::to_string(same->id) + "’s bid of " + fmt(same->max) +
                         " has already been placed, so it can’t be changed here.");
   }
-  if (same && cents(same->max) == max_bid) {
+  if (same && cents(same->max) == max_bid && !now_flag) {
     return Result::site("Snipe #" + std::to_string(same->id) + " is already set to " + fmt(max_bid) + ".");
   }
   long same_id = same ? same->id : 0;
@@ -595,6 +624,7 @@ Result Bot::add(const std::string& ref, double max_bid, long long edit) {
     s->max = max_bid;
     s->total = total;
     s->ends = now + left;
+    s->now = s->now || now_flag;
     save();
     return card(same_id, &lot, left, "✏️ <b>Snipe #" + std::to_string(same_id) + " updated</b>", old, edit);
   }
@@ -607,6 +637,7 @@ Result Bot::add(const std::string& ref, double max_bid, long long edit) {
   s.total = total;
   s.ends = now + left;
   s.check_at = now + check_after(left);
+  s.now = now_flag;
   snipes.push_back(s);
   save();
   return card(s.id, &lot, left, "🎯 <b>Snipe #" + std::to_string(s.id) + " scheduled</b>", NAN, edit);
@@ -629,7 +660,7 @@ Result Bot::card(long id, const Lot* lot, double left, const std::string& headin
   std::string text = (heading.empty() ? "🎯 <b>Snipe #" + sid + "</b>" : heading) + "\n" + link(s.url, s.title) +
                      "\n\nYour max: " + mx + "\n<i>Up to " + esc(s.total.empty() ? "?" : s.total) +
                      " with fees</i>\n\n" + prices(*lot) + "\nEnds <b>" + when(s.ends) + "</b>\nIn " + duration(left) +
-                     " · bidding " + num(LEAD) + "s before the end";
+                     (s.now ? " · <b>bidding right away</b>" : " · bidding " + num(LEAD) + "s before the end");
   Keyboard kb = Keyboard::empty();
   kb.rows.push_back({button("✏️ Change max", "edit:" + sid)});
   kb.rows.push_back({button("🔄 Refresh", "card:" + sid), button("✕ Cancel", "cancel:" + sid)});

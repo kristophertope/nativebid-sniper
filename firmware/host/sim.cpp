@@ -124,7 +124,9 @@ struct FakeNB : NativeBid {
     total = buf;
     return {};
   }
+  int places = 0;
   Result place(const std::string&, const std::string&, bool& ok, std::string& message) override {
+    places++;
     for (auto& kv : lots) {
       double left = kv.second.ends - c.t;
       if (!kv.second.placed && left > 0 && left < 62) {
@@ -403,8 +405,8 @@ static void buttons_and_html() {
   msg("/snipe X 10");
   msg("/cancel https://www.nativebid.com/Event/LotDetails/266333831/x");
   expect(contains(tg.sent.back().second, "cancelled"), "/cancel by URL");
-  msg("/snipe 1 10 -now");
-  expect(contains(plain(tg.sent.back().second), "I didn’t understand \"-now\""), "extra words explained");
+  msg("/snipe 1 10 later");
+  expect(contains(plain(tg.sent.back().second), "I didn’t understand \"later\""), "extra words explained");
   msg("/s 1 ten");
   expect(contains(plain(tg.sent.back().second), "\"ten\" isn’t a dollar amount"), "bad amount explained");
   msg("/bogus");
@@ -443,6 +445,14 @@ static void broken_snipe() {
          "G still bids on time while F's checks fail");
   int calls = nb.checks["1"] - before;
   expect(calls > 0 && calls <= 20, "F's failing check backs off to every 30s (" + std::to_string(calls) + " tries in 550s)");
+  bool f_kept = false;
+  for (const auto& s : bot.snipes) f_kept = f_kept || s.id == 1;
+  expect(f_kept, "F is kept while it has failed for less than a day");
+  run_until(bot, c, 600 + 24 * 3600 + 60);
+  expect(sent_with(tg, "Gave up on snipe #1"), "after a day of failures F is given up on");
+  bool f_gone = true;
+  for (const auto& s : bot.snipes) f_gone = f_gone && s.id != 1;
+  expect(f_gone, "F is removed from the saved snipes");
 }
 
 static void failing_bid() {
@@ -460,6 +470,42 @@ static void failing_bid() {
   expect(sent_with(tg, "Bid failed</b> · #1") && sent_with(tg, "Bidding is closed"), "reports Bid failed with the reason");
   expect(!sent_with(tg, "Snipe missed"), "doesn't claim the snipe was missed");
   expect(bot.snipes.empty(), "the failed snipe is removed");
+}
+
+static void bid_now() {
+  std::printf("\nscenario: -now bids right away, survives a restart, other snipes still wait\n");
+  Clock c;
+  FakeNB nb(c);
+  FakeTG tg(c);
+  nb.lots["N"] = {"1", c.t + 3600, 2.0, nullptr};
+  nb.lots["W"] = {"2", c.t + 7200, 2.0, nullptr};
+  nb.lots["R"] = {"3", c.t + 3600, 2.0, nullptr};
+  tg.inbox = {{1, 42, "/s W 5"}, {2, 42, "/snipe N 5 -NOW"}};
+  Bot bot(c, nb, tg);
+  bot.start();
+  run_until(bot, c, 60);
+  double at = -1;
+  expect(sent_with(tg, "bidding right away"), "the card says it's bidding right away");
+  expect(sent_with(tg, "Bid placed</b> · #2", &at) && at < 10, "bid placed within seconds (at " + std::to_string(at) + ")");
+  expect(nb.places == 1, "only the -now snipe bid (" + std::to_string(nb.places) + ")");
+  expect(bot.snipes.size() == 2 && bot.snipes[1].now && bot.snipes[1].state == "placed", "the -now snipe is placed");
+  expect(bot.snipes[0].state == "pending", "the other snipe still waits");
+
+  Clock c2;
+  c2.t = c.t;
+  FakeNB nb2(c2);
+  FakeTG tg2(c2);
+  nb2.lots["R"] = {"3", c2.t + 3600, 2.0, nullptr};
+  Bot first(c2, nb2, tg2);
+  first.start();
+  first.handle("/snipe R 5 \xE2\x80\x94now");
+  expect(first.snipes.size() == 1 && first.snipes[0].now, "an em-dash \"—now\" also counts");
+  Bot second(c2, nb2, tg2);
+  expect(second.snipes.size() == 1 && second.snipes[0].now, "the -now flag is saved");
+  tg2.inbox.clear();
+  second.start();
+  run_until(second, c2, c2.t - 1000000 + 30);
+  expect(nb2.places == 1 && second.snipes[0].state == "placed", "after a restart it still bids right away");
 }
 
 static void command_burst() {
@@ -512,6 +558,7 @@ static void time_replies() {
 }
 
 int main() {
+  bid_now();
   time_replies();
   command_burst();
   failing_bid();
