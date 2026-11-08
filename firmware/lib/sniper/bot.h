@@ -59,7 +59,7 @@ class Bot {
   Result poll(int wait);
   void report(const Result& r);
   bool answer_prompt(const std::string& text, const std::string& reply_to);
-  Result find(const std::string& ref, long& id);
+  Result find(const std::string& ref, long& id, bool placed_ok = false);
   Result by_lot(const std::string& ref, long& id);
   Result confirm(const Lot& lot, double amount, std::string& total);
   Result add(const std::string& ref, double max_bid, long long edit = 0, bool now = false);

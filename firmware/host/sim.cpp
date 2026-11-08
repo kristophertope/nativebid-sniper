@@ -491,8 +491,31 @@ static void bid_now() {
   expect(sent_with(tg, "bidding right away"), "the card says it's bidding right away");
   expect(sent_with(tg, "Bid placed</b> · #2", &at) && at < 10, "bid placed within seconds (at " + std::to_string(at) + ")");
   expect(nb.places == 1, "only the -now snipe bid (" + std::to_string(nb.places) + ")");
-  expect(bot.snipes.size() == 2 && bot.snipes[1].now && bot.snipes[1].state == "placed", "the -now snipe is placed");
+  expect(bot.snipes.size() == 2 && !bot.snipes[1].now && bot.snipes[1].state == "placed", "the -now snipe is placed");
   expect(bot.snipes[0].state == "pending", "the other snipe still waits");
+  bot.handle("/l");
+  bot.flush();
+  const Keyboard& list_kb = tg.messages.rbegin()->second.second;
+  bool edit2 = false;
+  for (const auto& row : list_kb.rows) {
+    for (const auto& b : row) edit2 = edit2 || b.second == "open:2";
+  }
+  expect(edit2, "/list offers Edit for a placed snipe");
+  bot.handle("/s N 4");
+  bot.flush();
+  expect(contains(tg.sent.back().second, "can’t lower it"), "lowering a placed bid is explained");
+  bot.handle("/s N 5");
+  bot.flush();
+  expect(bot.snipes[1].state == "placed" && contains(tg.sent.back().second, "can’t lower it"), "the same max is refused too");
+  bot.handle("/s N 7 -now");
+  bot.flush();
+  expect(contains(tg.sent.back().second, "Snipe #2 raised"), "raising a placed bid is accepted");
+  run_until(bot, c, c.t - 1000000 + 20);
+  expect(nb.places == 2 && bot.snipes[1].state == "placed" && bot.snipes[1].max == 7, "the raise with -now bids right away");
+  bot.handle("/s N 8");
+  bot.flush();
+  run_until(bot, c, c.t - 1000000 + 600);
+  expect(nb.places == 2 && bot.snipes[1].state == "pending", "a raise without -now waits for the end");
 
   Clock c2;
   c2.t = c.t;

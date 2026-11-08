@@ -364,6 +364,7 @@ Result Bot::bid_mode(long id) {
         "</b>\n<i>NativeBid: " + esc(message) + "</i>");
     Snipe* s = get(id);
     s->state = "placed";
+    s->now = false;
     s->check_at = p_.now() + LEAD;
     save();
   } else {
@@ -429,7 +430,7 @@ bool Bot::answer_prompt(const std::string& text, const std::string& reply_to) {
     return true;
   }
   long id = 0;
-  Result r = find(digits_after(reply_to, snipe_at + ASK.size()), id);
+  Result r = find(digits_after(reply_to, snipe_at + ASK.size()), id, true);
   if (r.ok()) r = add(get(id)->url, amount);
   report(r);
   return true;
@@ -503,11 +504,14 @@ void Bot::press(const std::string& query_id, const std::string& data, long long 
   Result r;
   if (kind == "edit") {
     long id = 0;
-    r = find(rest, id);
+    r = find(rest, id, true);
     if (r.ok()) {
       const Snipe& s = *get(id);
+      bool placed = s.state == "placed";
       say("✏️ <b>" + ASK + std::to_string(id) + "?</b>\n" + link(s.url, s.title) + "\n\nIt’s " + fmt(s.max) +
-              " now. Reply with the new amount, like <code>15</code>.",
+              (placed ? ", already placed. Reply with a higher amount and I’ll bid it " + num(LEAD) +
+                            "s before the end."
+                      : " now. Reply with the new amount, like <code>15</code>."),
           Keyboard::reply("New max, e.g. 15"));
     }
   } else if (kind == "new") {
@@ -520,7 +524,7 @@ void Bot::press(const std::string& query_id, const std::string& data, long long 
     }
   } else if (kind == "card" || kind == "open") {
     long id = 0;
-    r = find(rest, id);
+    r = find(rest, id, true);
     if (r.ok()) r = card(id, nullptr, 0, "", NAN, kind == "card" ? msg : 0);
   } else if (kind == "cancel") {
     r = cancel(rest, msg);
@@ -545,7 +549,7 @@ void Bot::press(const std::string& query_id, const std::string& data, long long 
   if (!a.ok()) p_.log("Couldn’t answer the button press: " + a.msg);
 }
 
-Result Bot::find(const std::string& raw, long& id) {
+Result Bot::find(const std::string& raw, long& id, bool placed_ok) {
   std::string ref = trim(raw);
   bool hash = starts_with(ref, "#");
   std::string sid = hash ? ref.substr(1) : ref;
@@ -558,8 +562,9 @@ Result Bot::find(const std::string& raw, long& id) {
     if (!r.ok()) return r;
   }
   if (!id) return Result::site("There’s no snipe matching " + ref + ". Send /list to see your snipes.");
-  if (get(id)->state != "pending") {
-    return Result::site("Snipe #" + std::to_string(id) + "’s bid has already been placed.");
+  if (!placed_ok && get(id)->state != "pending") {
+    return Result::site("Snipe #" + std::to_string(id) +
+                        "’s bid has already been placed, and NativeBid can’t take it back. You can still raise it.");
   }
   return {};
 }
@@ -614,9 +619,10 @@ Result Bot::add(const std::string& ref, double max_bid, long long edit, bool now
   for (auto& s : snipes) {
     if (s.listing_id == lot.listing_id) same = &s;
   }
-  if (same && same->state != "pending") {
+  bool raising = same && same->state != "pending";
+  if (raising && max_bid <= cents(same->max)) {
     return Result::site("Snipe #" + std::to_string(same->id) + "’s bid of " + fmt(same->max) +
-                        " has already been placed, so it can’t be changed here.");
+                        " is already placed, and NativeBid can’t lower it. Send a higher max to raise it.");
   }
   if (same && cents(same->max) == max_bid && !now_flag) {
     return Result::site("Snipe #" + std::to_string(same->id) + " is already set to " + fmt(max_bid) + ".");
@@ -633,8 +639,13 @@ Result Bot::add(const std::string& ref, double max_bid, long long edit, bool now
     s->total = total;
     s->ends = now + left;
     s->now = s->now || now_flag;
+    if (raising) {
+      s->state = "pending";
+      s->check_at = now + check_after(left);
+    }
     save();
-    return card(same_id, &lot, left, "✏️ <b>Snipe #" + std::to_string(same_id) + " updated</b>", old, edit);
+    return card(same_id, &lot, left,
+                "✏️ <b>Snipe #" + std::to_string(same_id) + (raising ? " raised" : " updated") + "</b>", old, edit);
   }
   Snipe s;
   s.id = next_id_++;
@@ -668,10 +679,16 @@ Result Bot::card(long id, const Lot* lot, double left, const std::string& headin
   std::string text = (heading.empty() ? "🎯 <b>Snipe #" + sid + "</b>" : heading) + "\n" + link(s.url, s.title) +
                      "\n\nYour max: " + mx + "\n<i>Up to " + esc(s.total.empty() ? "?" : s.total) +
                      " with fees</i>\n\n" + prices(*lot) + "\nEnds <b>" + when(s.ends) + "</b>\nIn " + duration(left) +
-                     (s.now ? " · <b>bidding right away</b>" : " · bidding " + num(LEAD) + "s before the end");
+                     (s.state == "placed" ? " · ✅ <b>bid placed</b>"
+                      : s.now           ? " · <b>bidding right away</b>"
+                                        : " · bidding " + num(LEAD) + "s before the end");
   Keyboard kb = Keyboard::empty();
-  kb.rows.push_back({button("✏️ Change max", "edit:" + sid)});
-  kb.rows.push_back({button("🔄 Refresh", "card:" + sid), button("✕ Cancel", "cancel:" + sid)});
+  if (s.state == "placed") {
+    kb.rows.push_back({button("✏️ Raise max", "edit:" + sid), button("🔄 Refresh", "card:" + sid)});
+  } else {
+    kb.rows.push_back({button("✏️ Change max", "edit:" + sid)});
+    kb.rows.push_back({button("🔄 Refresh", "card:" + sid), button("✕ Cancel", "cancel:" + sid)});
+  }
   say(text, kb, edit);
   return {};
 }
@@ -696,6 +713,7 @@ Result Bot::show(long long edit) {
       kb.rows.push_back({button("⚙️ Edit #" + sid, "open:" + sid), button("✕ Cancel #" + sid, "listcancel:" + sid)});
     } else {
       text += "\nMax <b>" + fmt(s->max) + "</b> · ✅ bid placed, waiting for the end";
+      kb.rows.push_back({button("⚙️ Edit #" + sid, "open:" + sid)});
     }
   }
   kb.rows.push_back(refresh);
@@ -734,8 +752,8 @@ Result Bot::info(const std::string& ref, long long edit) {
   }
   if (mine) text += "\n\n🎯 Snipe #" + std::to_string(mine->id) + " is set at <b>" + fmt(mine->max) + "</b>";
   std::vector<std::pair<std::string, std::string>> row;
-  if (mine && mine->state == "pending") {
-    row.push_back(button("✏️ Change max", "edit:" + std::to_string(mine->id)));
+  if (mine && (mine->state == "pending" || left > 0)) {
+    row.push_back(button(mine->state == "pending" ? "✏️ Change max" : "✏️ Raise max", "edit:" + std::to_string(mine->id)));
   } else if (!mine && left > 0) {
     std::vector<std::string> lot_numbers = numbers(lot.url);
     row.push_back(button("✏️ Set max", "new:" + (lot_numbers.empty() ? lot.listing_id : lot_numbers[0])));
