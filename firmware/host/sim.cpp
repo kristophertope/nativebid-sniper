@@ -373,8 +373,19 @@ static void buttons_and_html() {
   expect(contains(tg.messages[tg.next_id - 1].first, "New max for snipe #1?"), "/info ✏️ on a sniped lot asks for its new max");
   msg("/list");
   long long list = tg.next_id - 1;
+  expect(contains(tg.messages[list].first, "⏳ <b>#1</b>") && contains(tg.messages[list].first, "Now <b>$7.00</b>"),
+         "/list shows the current price of a snipe that can still win");
+  nb.lots["X"].minimum = 12;
+  press(list, "🔄 Refresh");
+  expect(contains(tg.messages[list].first, "❌ <b>#1</b>") && contains(tg.messages[list].first, "Can’t win"),
+         "/list flags a snipe whose next bid is over its max");
+  press(list, "✏️ Raise #1");
+  expect(contains(tg.messages[tg.next_id - 1].first, "New max for snipe #1?"), "Raise from the list asks for a new max");
+  nb.lots["X"].minimum = 8;
+  press(list, "🔄 Refresh");
+  long long before = tg.next_id;
   press(list, "⚙️ Edit #1");
-  expect(tg.next_id - 1 == list + 1, "Edit opens a new card");
+  expect(tg.next_id == before + 1, "Edit opens a new card");
   press(list, "✕ Cancel #1");
   expect(contains(tg.messages[list].first, "No snipes"), "Cancel from the list re-renders it");
   press(card, "✏️ Change max");

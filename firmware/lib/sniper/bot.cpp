@@ -703,19 +703,60 @@ Result Bot::show(long long edit) {
   std::vector<const Snipe*> sorted;
   for (const auto& s : snipes) sorted.push_back(&s);
   std::stable_sort(sorted.begin(), sorted.end(), [](const Snipe* a, const Snipe* b) { return a->ends < b->ends; });
-  std::string text = "📋 <b>Your snipes</b>";
+  double window = INFINITY;
+  for (const auto& s : snipes) {
+    if (s.state == "pending" && !s.now) window = std::min(window, s.ends - LEAD - BID_WINDOW);
+  }
+  std::map<long, Lot> lots;
+  bool skipped = false;
+  for (const Snipe* s : sorted) {
+    if (p_.now() + 20 > window) {
+      skipped = true;
+      break;
+    }
+    Lot lot;
+    if (nb_.lot(s->url, lot).ok()) lots[s->id] = lot;
+  }
+  now = p_.now();
+  int lost = 0, waiting = 0, placed = 0;
+  std::string body;
   Keyboard kb = Keyboard::empty();
   for (const Snipe* s : sorted) {
     std::string sid = std::to_string(s->id);
-    text += "\n\n<b>#" + sid + "</b> · " + link(s->url, prefix(s->title, 60));
-    if (s->state == "pending") {
-      text += "\nMax <b>" + fmt(s->max) + "</b> · ends in <b>" + duration(s->ends - now) + "</b>";
-      kb.rows.push_back({button("⚙️ Edit #" + sid, "open:" + sid), button("✕ Cancel #" + sid, "listcancel:" + sid)});
+    auto found = lots.find(s->id);
+    const Lot* lot = found == lots.end() ? nullptr : &found->second;
+    bool hopeless = s->state == "pending" && lot && lot->minimum > cents(s->max);
+    std::string icon = s->state == "placed" ? "✅" : hopeless ? "❌" : "⏳";
+    std::string line = lot ? "Now <b>" + fmt(lot->price) + "</b> · " : "";
+    if (hopeless) {
+      line += "next bid " + fmt(lot->minimum) + " &gt; max <b>" + fmt(s->max) + "</b>";
     } else {
-      text += "\nMax <b>" + fmt(s->max) + "</b> · ✅ bid placed, waiting for the end";
+      line += "max <b>" + fmt(s->max) + "</b>";
+    }
+    line += " · ends in " + duration(s->ends - now);
+    body += "\n\n" + icon + " <b>#" + sid + "</b> · " + link(s->url, prefix(s->title, 60)) + "\n" + line;
+    if (!lot && !skipped) body += "\n<i>Price unavailable</i>";
+    if (hopeless) body += "\n<i>Can’t win at this max. Raise it or cancel.</i>";
+    if (s->state == "placed") {
+      placed++;
+      if (lot && !lot->status.empty()) body += "\n<i>" + esc(lot->status) + "</i>";
       kb.rows.push_back({button("⚙️ Edit #" + sid, "open:" + sid)});
+    } else if (hopeless) {
+      lost++;
+      kb.rows.push_back({button("✏️ Raise #" + sid, "edit:" + sid), button("✕ Cancel #" + sid, "listcancel:" + sid)});
+    } else {
+      waiting++;
+      kb.rows.push_back({button("⚙️ Edit #" + sid, "open:" + sid), button("✕ Cancel #" + sid, "listcancel:" + sid)});
     }
   }
+  std::vector<std::string> counts;
+  if (lost) counts.push_back("❌ " + std::to_string(lost) + " can’t win");
+  if (waiting) counts.push_back("⏳ " + std::to_string(waiting) + " waiting");
+  if (placed) counts.push_back("✅ " + std::to_string(placed) + " placed");
+  std::string text = "📋 <b>Your snipes</b>\n";
+  for (size_t i = 0; i < counts.size(); i++) text += (i ? " · " : "") + counts[i];
+  if (skipped) text += "\n<i>Prices skipped, a bid is about to go out.</i>";
+  text += body;
   kb.rows.push_back(refresh);
   say(text, kb, edit);
   return {};
