@@ -361,10 +361,14 @@ Result Bot::bid_mode(long id) {
   std::string title = link(snap.url, snap.title);
   if (ok) {
     say("✅ <b>Bid placed</b> · #" + std::to_string(id) + "\n" + title + "\n\nYour max: <b>" + fmt(snap.max) +
-        "</b>\n<i>NativeBid: " + esc(message) + "</i>");
+        "</b>\n<i>NativeBid: " + esc(message) + "</i>" +
+        (snap.now ? "\n\nNot tracking this lot. It’s in your NativeBid watch list." : ""));
+    if (snap.now) {
+      drop(id);
+      return {};
+    }
     Snipe* s = get(id);
     s->state = "placed";
-    s->now = false;
     s->check_at = p_.now() + LEAD;
     save();
   } else {

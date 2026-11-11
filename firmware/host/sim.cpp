@@ -497,63 +497,62 @@ static void failing_bid() {
 }
 
 static void bid_now() {
-  std::printf("\nscenario: -now bids right away, survives a restart, other snipes still wait\n");
+  std::printf("\nscenario: -now bids right away and isn't kept, survives a restart, other snipes still wait\n");
   Clock c;
   FakeNB nb(c);
   FakeTG tg(c);
   nb.lots["N"] = {"1", c.t + 3600, 2.0, nullptr};
   nb.lots["W"] = {"2", c.t + 7200, 2.0, nullptr};
   nb.lots["R"] = {"3", c.t + 3600, 2.0, nullptr};
-  tg.inbox = {{1, 42, "/s W 5"}, {2, 42, "/snipe N 5 -NOW"}};
+  nb.lots["P"] = {"4", c.t + 300, 2.0, nullptr};
+  tg.inbox = {{1, 42, "/s W 5"}, {2, 42, "/snipe N 5 -NOW"}, {3, 42, "/s P 5"}};
   Bot bot(c, nb, tg);
   bot.start();
   run_until(bot, c, 60);
   double at = -1;
   expect(sent_with(tg, "bidding right away"), "the card says it's bidding right away");
   expect(sent_with(tg, "Bid placed</b> · #2", &at) && at < 10, "bid placed within seconds (at " + std::to_string(at) + ")");
+  expect(sent_with(tg, "watch list"), "the bid message points to the watch list");
   expect(nb.places == 1, "only the -now snipe bid (" + std::to_string(nb.places) + ")");
-  expect(bot.snipes.size() == 2 && !bot.snipes[1].now && bot.snipes[1].state == "placed", "the -now snipe is placed");
+  bool kept = false;
+  for (const auto& s : bot.snipes) kept = kept || s.id == 2;
+  expect(!kept && bot.snipes.size() == 2, "the -now snipe is dropped after its bid");
+  expect(nb.watched == std::vector<std::string>{"2", "1", "4"}, "each new snipe watches its lot once");
+  run_until(bot, c, 260);
+  expect(nb.places == 2 && bot.snipes[1].state == "placed", "the end snipe on P is placed");
   expect(bot.snipes[0].state == "pending", "the other snipe still waits");
   bot.handle("/l");
   bot.flush();
   const Keyboard& list_kb = tg.messages.rbegin()->second.second;
-  bool edit2 = false;
+  bool edit3 = false;
   for (const auto& row : list_kb.rows) {
-    for (const auto& b : row) edit2 = edit2 || b.second == "open:2";
+    for (const auto& b : row) edit3 = edit3 || b.second == "open:3";
   }
-  expect(edit2, "/list offers Edit for a placed snipe");
-  expect(nb.watched == std::vector<std::string>{"2", "1"}, "each new snipe watches its lot once");
-  nb.lots["N"].placed = true;
-  bot.handle("/l");
-  bot.flush();
-  expect(contains(tg.messages.rbegin()->second.first, "✅ <b>#2</b>") && contains(tg.messages.rbegin()->second.first, "Winning"),
+  expect(edit3, "/list offers Edit for a placed snipe");
+  expect(contains(tg.messages.rbegin()->second.first, "✅ <b>#3</b>") && contains(tg.messages.rbegin()->second.first, "Winning"),
          "/list shows a placed snipe that is winning");
-  nb.lots["N"].outbid = true;
+  nb.lots["P"].outbid = true;
   bot.handle("/l");
   bot.flush();
   const auto& outbid_list = tg.messages.rbegin()->second;
-  bool raise2 = false;
+  bool raise3 = false;
   for (const auto& row : outbid_list.second.rows) {
-    for (const auto& b : row) raise2 = raise2 || b.second == "edit:2";
+    for (const auto& b : row) raise3 = raise3 || b.second == "edit:3";
   }
-  expect(contains(outbid_list.first, "❌ <b>#2</b>") && contains(outbid_list.first, "Outbid") && raise2,
+  expect(contains(outbid_list.first, "❌ <b>#3</b>") && contains(outbid_list.first, "Outbid") && raise3,
          "/list flags a placed snipe that was outbid and offers Raise");
-  nb.lots["N"].outbid = false;
-  bot.handle("/s N 4");
+  nb.lots["P"].outbid = false;
+  bot.handle("/s P 4");
   bot.flush();
   expect(contains(tg.sent.back().second, "can’t lower it"), "lowering a placed bid is explained");
-  bot.handle("/s N 5");
+  bot.handle("/s P 5");
   bot.flush();
   expect(bot.snipes[1].state == "placed" && contains(tg.sent.back().second, "can’t lower it"), "the same max is refused too");
-  bot.handle("/s N 7 -now");
+  bot.handle("/s P 7 -now");
   bot.flush();
-  expect(contains(tg.sent.back().second, "Snipe #2 raised"), "raising a placed bid is accepted");
-  run_until(bot, c, c.t - 1000000 + 20);
-  expect(nb.places == 2 && bot.snipes[1].state == "placed" && bot.snipes[1].max == 7, "the raise with -now bids right away");
-  bot.handle("/s N 8");
-  bot.flush();
-  run_until(bot, c, c.t - 1000000 + 600);
-  expect(nb.places == 2 && bot.snipes[1].state == "pending", "a raise without -now waits for the end");
+  expect(contains(tg.sent.back().second, "Snipe #3 raised"), "raising a placed bid is accepted");
+  run_until(bot, c, c.t - 1000000 + 10);
+  expect(nb.places == 3 && bot.snipes.size() == 1, "the raise with -now bids right away and is dropped");
 
   Clock c2;
   c2.t = c.t;
@@ -569,7 +568,7 @@ static void bid_now() {
   tg2.inbox.clear();
   second.start();
   run_until(second, c2, c2.t - 1000000 + 30);
-  expect(nb2.places == 1 && second.snipes[0].state == "placed", "after a restart it still bids right away");
+  expect(nb2.places == 1 && second.snipes.empty(), "after a restart it still bids right away, then is dropped");
 }
 
 static void command_burst() {
