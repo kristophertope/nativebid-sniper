@@ -110,6 +110,11 @@ struct FakeNB : NativeBid {
     }
     return Result::site("unknown id");
   }
+  std::vector<std::string> watched;
+  Result watch(const std::string& id) override {
+    watched.push_back(id);
+    return {};
+  }
   Result login() override {
     events.push_back("login");
     return {};
@@ -517,6 +522,7 @@ static void bid_now() {
     for (const auto& b : row) edit2 = edit2 || b.second == "open:2";
   }
   expect(edit2, "/list offers Edit for a placed snipe");
+  expect(nb.watched == std::vector<std::string>{"2", "1"}, "each new snipe watches its lot once");
   nb.lots["N"].placed = true;
   bot.handle("/l");
   bot.flush();

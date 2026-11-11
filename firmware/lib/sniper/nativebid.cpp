@@ -79,6 +79,15 @@ Result NativeBid::login() {
   return {};
 }
 
+Result NativeBid::watch(const std::string& listing_id) {
+  Reply r = web_.request("GET", std::string(BASE) + "/Listing/AddWatch/" + listing_id, "", {}, 20, false,
+                         [](const Reply&) { return false; }, [](const char*, size_t) { return false; });
+  if (!r.ok) return Result::network(r.error);
+  if (contains(r.location, "/Account/LogOn")) return Result::not_signed_in();
+  if (r.status >= 400) return Result::site("AddWatch returned HTTP " + std::to_string(r.status));
+  return {};
+}
+
 Result NativeBid::confirm(const Lot& lot, double amount, std::string& action, std::string& params, std::string& total) {
   char amt[32];
   std::snprintf(amt, sizeof amt, "%.2f", amount);

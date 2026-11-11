@@ -71,6 +71,7 @@ static int usage() {
                "usage: sniper bot\n"
                "       sniper info <lot>\n"
                "       sniper confirm <lot> <max>   (signs in and loads the confirmation; never bids)\n"
+               "       sniper watch <lot>\n"
                "       sniper scan <lot|confirm|login> <file>\n");
   return 2;
 }
@@ -124,6 +125,19 @@ int main(int argc, char** argv) {
       return 1;
     }
     describe(platform, lot, left);
+    return 0;
+  }
+
+  if (cmd == "watch" && argc == 3) {
+    Lot lot;
+    Result r = nb.login();
+    if (r.ok()) r = nb.lot(argv[2], lot);
+    if (r.ok()) r = nb.watch(lot.listing_id);
+    if (!r.ok()) {
+      platform.log("\xE2\x9C\x97 " + r.msg);
+      return 1;
+    }
+    platform.log("Watching " + lot.title);
     return 0;
   }
 

@@ -17,6 +17,7 @@ class NativeBid {
   virtual Result lot(const std::string& ref, Lot& out);
   virtual Result time_remaining(const std::string& listing_id, double& left);
   virtual Result login();
+  virtual Result watch(const std::string& listing_id);
   virtual Result confirm(const Lot& lot, double amount, std::string& action, std::string& params, std::string& total);
   virtual Result place(const std::string& action, const std::string& params, bool& ok, std::string& message);
   std::map<std::string, std::string> messages;
