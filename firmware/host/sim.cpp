@@ -53,6 +53,7 @@ struct FakeLot {
   std::function<void(FakeLot&, double left)> on_check;
   bool placed = false;
   double placed_left = -1;
+  bool outbid = false;
 };
 
 struct FakeNB : NativeBid {
@@ -90,6 +91,10 @@ struct FakeNB : NativeBid {
     out.minimum = ended ? NAN : f->minimum;
     out.status = ended ? "Ended" : "Active";
     out.bids = 3;
+    if (f->placed) {
+      out.winning = f->outbid ? 0 : 1;
+      out.standing = f->outbid ? "You are not the high bidder." : "You are currently winning this item!";
+    }
     return {};
   }
   Result time_remaining(const std::string& id, double& left) override {
@@ -512,6 +517,22 @@ static void bid_now() {
     for (const auto& b : row) edit2 = edit2 || b.second == "open:2";
   }
   expect(edit2, "/list offers Edit for a placed snipe");
+  nb.lots["N"].placed = true;
+  bot.handle("/l");
+  bot.flush();
+  expect(contains(tg.messages.rbegin()->second.first, "✅ <b>#2</b>") && contains(tg.messages.rbegin()->second.first, "Winning"),
+         "/list shows a placed snipe that is winning");
+  nb.lots["N"].outbid = true;
+  bot.handle("/l");
+  bot.flush();
+  const auto& outbid_list = tg.messages.rbegin()->second;
+  bool raise2 = false;
+  for (const auto& row : outbid_list.second.rows) {
+    for (const auto& b : row) raise2 = raise2 || b.second == "edit:2";
+  }
+  expect(contains(outbid_list.first, "❌ <b>#2</b>") && contains(outbid_list.first, "Outbid") && raise2,
+         "/list flags a placed snipe that was outbid and offers Raise");
+  nb.lots["N"].outbid = false;
   bot.handle("/s N 4");
   bot.flush();
   expect(contains(tg.sent.back().second, "can’t lower it"), "lowering a placed bid is explained");

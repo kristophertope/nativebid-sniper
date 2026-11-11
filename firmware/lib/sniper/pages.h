@@ -19,11 +19,13 @@ struct Lot {
   double minimum = NAN;
   double my_max = NAN;
   int bids = -1;
+  int winning = -1;
+  std::string standing;
 };
 
 class LotPage : public Scanner {
  public:
-  enum { R_MESSAGE, R_LISTING_ID, R_TYPE, R_TITLE, R_STATUS, R_PRICE, R_MINIMUM, R_BIDDERMAX, R_MAX_BID, R_BIDS };
+  enum { R_MESSAGE, R_LISTING_ID, R_TYPE, R_TITLE, R_STATUS, R_PRICE, R_MINIMUM, R_BIDDERMAX, R_MAX_BID, R_BIDS, R_STANDING };
   LotPage();
   Lot lot(const std::string& url) const;
   std::map<std::string, std::string> messages;

@@ -28,12 +28,16 @@ LotPage::LotPage() {
   rule(R_MAX_BID, max_bid);
   static const auto bids = compile_all({">%s%d%s</span>%bBid(s)", ">%s%d%bBid(s)"});
   rule(R_BIDS, bids);
+  static const auto standing = compile_all({"ContextualStatus\"%*>>%s<div class=\"alert alert-%w\">%s%^<<"});
+  rule(R_STANDING, standing);
   needed_ = {R_LISTING_ID, R_TYPE, R_TITLE, R_STATUS, R_PRICE, R_MINIMUM, R_BIDDERMAX, R_MAX_BID, R_BIDS};
 }
 
 void LotPage::hit(int id, const Match& m, size_t at, const std::string& buf) {
   if (id == R_MESSAGE) {
     messages[m.caps[0]] = js_unescape(m.caps[1]);
+  } else if (id == R_STANDING) {
+    found_[id] = m.caps[0] + " " + m.caps[1];
   } else if (id == R_BIDDERMAX) {
     size_t q = buf.rfind('"', m.start);
     std::string before = q == std::string::npos ? std::string() : buf.substr(q + 1, m.start - q - 1);
@@ -56,6 +60,14 @@ Lot LotPage::lot(const std::string& url) const {
   double mine = shown ? money(get(R_MAX_BID)) : NAN;
   l.my_max = mine == 0 ? NAN : mine;
   if (has(R_BIDS)) l.bids = std::atoi(get(R_BIDS).c_str());
+  if (has(R_STANDING)) {
+    std::string s = get(R_STANDING);
+    size_t space = s.find(' ');
+    std::string kind = s.substr(0, space);
+    l.standing = trim(html_unescape(s.substr(space + 1)));
+    if (kind == "success") l.winning = 1;
+    if (kind == "danger") l.winning = 0;
+  }
   return l;
 }
 

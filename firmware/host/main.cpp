@@ -85,9 +85,9 @@ static int scan(const std::string& kind, const std::string& path) {
     LotPage p;
     run(p);
     Lot l = p.lot(path);
-    std::printf("listing %s · %s · %s · price %s · next %s · my max %s · %d bids · %zu messages\n",
+    std::printf("listing %s · %s · %s · price %s · next %s · my max %s · %d bids · %zu messages · winning %d %s\n",
                 l.listing_id.c_str(), l.title.c_str(), l.status.c_str(), fmt(l.price).c_str(), fmt(l.minimum).c_str(),
-                fmt(l.my_max).c_str(), l.bids, p.messages.size());
+                fmt(l.my_max).c_str(), l.bids, p.messages.size(), l.winning, l.standing.c_str());
   } else if (kind == "confirm") {
     ConfirmPage p;
     run(p);
