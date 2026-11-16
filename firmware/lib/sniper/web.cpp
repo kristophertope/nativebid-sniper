@@ -41,10 +41,11 @@ Reply Web::request(std::string method, std::string url, std::string body, const 
         if (name == "set-cookie" && cookies_) store_cookie(h.value);
       }
       hopping = follow && redirect(head.status) && !reply.location.empty();
-      return !hopping && (!want_body || want_body(reply));
+      return hopping || !want_body || want_body(reply);
     };
+    auto on_data = [&](const char* d, size_t n) { return hopping || !sink || sink(d, n); };
     std::string error;
-    if (!p_.http(req, on_head, sink, error)) {
+    if (!p_.http(req, on_head, on_data, error)) {
       reply.error = error.empty() ? "connection failed" : error;
       return reply;
     }
