@@ -663,9 +663,10 @@ Result Bot::add(const std::string& ref, double max_bid, long long edit, bool now
   s.now = now_flag;
   snipes.push_back(s);
   save();
+  Result shown = card(s.id, &lot, left, "🎯 <b>Snipe #" + std::to_string(s.id) + " scheduled</b>", NAN, edit);
   r = nb_.watch(lot.listing_id);
   if (!r.ok()) p_.log("Couldn’t watch lot " + lot.listing_id + " (" + r.msg + ")");
-  return card(s.id, &lot, left, "🎯 <b>Snipe #" + std::to_string(s.id) + " scheduled</b>", NAN, edit);
+  return shown;
 }
 
 Result Bot::card(long id, const Lot* lot, double left, const std::string& heading, double old, long long edit) {

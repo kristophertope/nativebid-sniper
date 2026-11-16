@@ -81,7 +81,7 @@ Result NativeBid::login() {
 
 Result NativeBid::watch(const std::string& listing_id) {
   Reply r = web_.request("GET", std::string(BASE) + "/Listing/AddWatch/" + listing_id, "", {}, 20, false,
-                         [](const Reply&) { return false; }, [](const char*, size_t) { return false; });
+                         [](const Reply&) { return true; }, [](const char*, size_t) { return true; });
   if (!r.ok) return Result::network(r.error);
   if (contains(r.location, "/Account/LogOn")) return Result::not_signed_in();
   if (r.status >= 400) return Result::site("AddWatch returned HTTP " + std::to_string(r.status));
